@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>茂名展示馆 · 3DGS 实景查看器</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./viewer/index.css">
+<link rel="stylesheet" href="./app.css">
+<!-- 标注编辑器样式：仅定义 .ed-* / html.mg-editor-on 规则，浏览态无对应 DOM，
+     不产生任何视觉变化；编辑态由 bridge.js 动态挂载 UI 后生效。 -->
+<link rel="stylesheet" href="./editor/editor.css">
+<!-- 标注编辑器模块预载：在 HTML 解析期就把整个 editor.js 模块图下载并预编译。
+     3DGS 渲染循环会长时间占满主线程，动态 import() 的模块求值要等渲染空窗
+     才有机会执行（实测冷启动可等 2~8 秒）。用 modulepreload 提前预编译后，
+     点「标注编辑」时 import() 命中编译缓存，几乎瞬时进入编辑态。
+     代价仅为 editor/ 目录约 70 KB 的一次性下载，不影响浏览态渲染。 -->
+<link rel="modulepreload" href="./editor/editor.js">
+<!-- 3DGS 数字人（增量集成，见 docs/ARCHITECTURE.md）：
+     importmap 只服务 human/ 目录下的 three 裸导入；不加载时不下载任何 three 资源。
+     回滚方式：注释下面 2 行 + 文件末尾的 1 行 script 即可，其余零影响。 -->
+<script type="importmap">
+{"imports":{"three":"./human/vendor/three/three.module.js","three/addons/":"./human/vendor/three/addons/"}}
+</script>
+<script>
+  // 嵌入展览馆首页时，楼层/场景切换统一由首页的楼层导航驱动
+  const mgEmbed = new URLSearchParams(location.search).get('embed');
+  if (mgEmbed === '1' || mgEmbed === 'showroom') {
+    document.documentElement.classList.add('mg-embed');
+  }
+  if (mgEmbed === 'showroom') {
+    // 展厅融合页：只保留全屏三维画面，顶栏 / 浮层 / 小地图由父页面接管
+    document.documentElement.classList.add('mg-bare');
+  }
+</script>
+</head>
+<body>
+<div id="mg-app">
+  <header id="mg-bar">
+    <div class="mg-brand">
+      <span class="mg-mark"></span>
+      <div class="mg-brandtext"><b>茂名展示馆</b><small>3D Gaussian Splatting 实景查看器</small></div>
+    </div>
+
+    <nav id="mg-scenes" aria-label="场景切换">
+      <button type="button" class="mg-scene" data-spawn="outdoor" data-scene="floor1">
+        <span>1层室外</span><small>室外广场 / 停车场</small>
+      </button>
+      <button type="button" class="mg-scene" data-spawn="floor1" data-scene="floor1">
+        <span>1层室内</span><small>接待台 / 大厅</small>
+      </button>
+      <button type="button" class="mg-scene" data-spawn="floor3" data-scene="floor3">
+        <span>三层室内</span><small>展厅 / 展板 / 落地窗</small>
+      </button>
+    </nav>
+
+    <div id="mg-controls" class="mg-controls">
+      <button type="button" id="mg-clean" class="mg-toggle mg-on" title="切换「已清理模糊高斯」场景（G）">
+        清理 <b id="mg-clean-state">开</b>
+      </button>
+      <button type="button" id="mg-collision" class="mg-toggle mg-on" title="开关碰撞（C）">
+        碰撞 <b id="mg-collision-state">开</b>
+      </button>
+      <button type="button" id="mg-map" class="mg-toggle mg-on" title="开关三维导航小地图（M）">小地图 <b id="mg-map-state">开</b></button>
+      <div class="mg-speed" title="WASD / 摇杆移动速度，自动记忆">
+        <span>速度</span>
+        <button type="button" id="mg-speed-down" aria-label="减速">−</button>
+        <input type="range" id="mg-speed" min="0.25" max="4" step="0.25" value="1" aria-label="移动速度倍率">
+        <button type="button" id="mg-speed-up" aria-label="加速">+</button>
+        <b id="mg-speed-val">1.00×</b>
+      </div>
+    </div>
+
+    <div class="mg-actions">
+      <span id="mg-gpu" class="mg-badge">正在检测显卡…</span>
+      <button type="button" class="mg-btn" id="mg-lan" title="局域网访问地址">局域网</button>
+      <button type="button" class="mg-btn" id="mg-tools" title="场景工具 (T)">工具</button>
+      <button type="button" class="mg-btn" id="mg-full" title="全屏 (F11)">全屏</button>
+      <button type="button" class="mg-btn" id="mg-help" title="操作说明">操作说明</button>
+    </div>
+  </header>
+
+  <main id="mg-stage"></main>
+
+  <div id="mg-loading">
+    <div class="mg-spin"></div>
+    <div class="mg-loadtext">正在载入三维场景</div>
+    <div class="mg-loadsub" id="mg-loadsub">首次加载大模型约需数十秒，请稍候</div>
+  </div>
+
+  <aside id="mg-helpbox" hidden>
+    <div class="mg-helphd"><b>操作说明</b><button type="button" id="mg-helpclose" aria-label="关闭">×</button></div>
+    <ul>
+      <li><b>左键拖动</b> 旋转视角</li>
+      <li><b>右键拖动 / 双指</b> 平移</li>
+      <li><b>滚轮</b> 拉近 / 拉远</li>
+      <li><b>F</b> 自动取景（回到全景）</li>
+      <li><b>R</b> 重置相机</li>
+      <li><b>F11</b> 全屏，<b>1 / 2 / 3</b> 切换「1层室外 / 1层室内 / 三层室内」</li>
+      <li><b>顶栏三个按钮</b> 各自直达对应出生点，点按即可重置到该机位</li>
+      <li><b>W / A / S / D</b> 碰撞漫游（官方 PLY + btree 驱动，不会穿墙）</li>
+      <li><b>顶栏「碰撞」按钮 / C</b> 开关碰撞（默认开启，贴地漫游不穿墙；关闭后可自由飞行）</li>
+      <li><b>顶栏「局域网」</b> 查看并复制其他设备可用的访问地址（服务默认绑定 0.0.0.0）</li>
+      <li><b>顶栏速度滑杆 / [ ]</b> 调节 WASD 与摇杆快慢（0.25×–4×，自动记忆）</li>
+      <li><b>Shift / Ctrl</b> 按住临时加速 / 减速（引擎自带）</li>
+      <li><b>顶栏「清理」/ G</b> 在原始场景与模糊点清理版之间切换</li>
+      <li><b>顶栏「工具」/ T</b> 打开高斯清理、出生点标定与碰撞体调试面板</li>
+      <li><b>B</b> 开关碰撞分块包围盒，<b>V</b> 开关碰撞网格线框（引擎内置）</li>
+      <li><b>L</b> 开始/停止录制漫游，<b>P</b> 播放/停止路线（工具面板「漫游录制」）</li>
+      <li><b>M</b> 或顶栏「小地图」按钮 显示/隐藏左下角三维导航小地图；在小地图上<b>拖动</b>旋转、<b>滚轮</b>缩放、双击复位</li>
+    </ul>
+    <p>默认加载已清理模糊高斯的完整 LOD0 单文件 SOG（<code>mm_floor1_clean.sog</code> / <code>mm_floor3_clean.sog</code>）；碰撞网格取自原始 <code>meta.lcc2</code> 工程，官方米制 Z-up 顶点仅做 <code>world = (x, z, -y)</code> 轴变换，与 3DGS / 出生点 / 漫游路径同处一个米制世界。推荐使用 Chrome / Edge 并保持硬件加速开启：本机 <code>127.0.0.1</code> 访问默认使用 WebGPU；用局域网 IP 打开时因非安全上下文只能走 WebGL2，顶栏徽标会显示具体原因（安全上下文下可点击重试）。</p>
+  </aside>
+
+  <aside id="mg-toolsbox" hidden>
+    <div class="mg-helphd"><b>场景工具</b><button type="button" id="mg-toolsclose" aria-label="关闭">×</button></div>
+    <div class="mg-tooltabs">
+      <button type="button" class="mg-tooltab mg-on" data-tab="route">漫游录制</button>
+      <button type="button" class="mg-tooltab" data-tab="collision">碰撞体</button>
+      <button type="button" class="mg-tooltab" data-tab="clean">清理</button>
+      <button type="button" class="mg-tooltab" data-tab="spawn">出生点</button>
+    </div>
+    <div class="mg-toolsection" data-section="route">
+      <p class="mg-tooltip"><b>漫游录制</b>：按帧采样相机位姿并存到本机浏览器。下次打开可用「播放链接」或「自动播放」直接回放；导出的 JSON 与官方 <code>walk_path.json</code> 同构，WebM 是纯 3D 画面。</p>
+      <div class="mg-toolrow">
+        <label class="mg-toolcheck">帧率 <input id="mg-route-fps" type="number" min="5" max="60" value="24" class="mg-toolnum"></label>
+        <label class="mg-toolcheck">最长 <input id="mg-route-secs" type="number" min="5" max="300" value="60" class="mg-toolnum"> 秒</label>
+      </div>
+      <div class="mg-toolrow">
+        <button type="button" class="mg-toolbtn" id="mg-route-rec">● 开始录制</button>
+        <button type="button" class="mg-toolbtn" id="mg-route-play">▶ 播放</button>
+        <button type="button" class="mg-toolbtn" id="mg-route-stop">■ 停止</button>
+      </div>
+      <div class="mg-toolrow">
+        <select id="mg-route-list" class="mg-toolselect mg-routelist"></select>
+        <button type="button" class="mg-toolbtn" id="mg-route-copy">播放链接</button>
+        <button type="button" class="mg-toolbtn" id="mg-route-del">删除</button>
+      </div>
+      <div class="mg-toolrow">
+        <button type="button" class="mg-toolbtn" id="mg-route-json">导出路线 JSON</button>
+        <button type="button" class="mg-toolbtn" id="mg-route-video">导出 WebM 视频</button>
+        <button type="button" class="mg-toolbtn" id="mg-route-import">导入 JSON</button>
+        <input type="file" id="mg-route-file" accept=".json,application/json" hidden>
+      </div>
+      <div class="mg-toolrow">
+        <label class="mg-toolcheck"><input type="checkbox" id="mg-route-loop"> 循环播放</label>
+        <label class="mg-toolcheck"><input type="checkbox" id="mg-route-auto"> 打开页面自动播放</label>
+      </div>
+      <pre id="mg-route-info">载入中…</pre>
+      <b id="mg-route-msg" class="mg-toolmsg"></b>
+    </div>
+    <div class="mg-toolsection" data-section="collision" hidden>
+      <p class="mg-tooltip"><b>碰撞体调试</b>：显示真正参与物理查询的网格线框，以及官方分块 AABB 盒子。绿色 = 相机当前所在盒子；默认使用与碰撞网格一致的米制坐标，可切到旧 log 压缩版本做对照。</p>
+      <div class="mg-toolrow">
+        <button type="button" class="mg-toolbtn" id="mg-col-mesh">碰撞网格 关</button>
+        <button type="button" class="mg-toolbtn" id="mg-col-boxes">分块包围盒 关</button>
+        <button type="button" class="mg-toolbtn" id="mg-col-refresh">刷新诊断</button>
+      </div>
+      <div class="mg-toolrow">
+        <label class="mg-toolcheck">坐标
+          <select id="mg-col-mode" class="mg-toolselect">
+            <option value="meter" selected>米制 Y-up（当前生效）</option>
+            <option value="log">旧 log 压缩（仅对照）</option>
+          </select>
+        </label>
+        <label class="mg-toolcheck"><input type="checkbox" id="mg-col-xray" checked> 穿透显示</label>
+      </div>
+      <pre id="mg-col-info">载入中…</pre>
+    </div>
+    <div class="mg-toolsection" data-section="clean" hidden>
+      <p class="mg-tooltip"><b>高斯清理</b>：<code id="mg-clean-info">—</code></p>
+      <p class="mg-tooltip">离线删除半径过大（大面积拖影）与不透明度过低（雾状半透明）的高斯点，颜色、朝向与球谐细节保持不变。顶栏「清理」按钮或 G 键可在原始 / 清理版之间切换对照。</p>
+    </div>
+    <div class="mg-toolsection" data-section="spawn" hidden>
+      <p class="mg-tooltip"><b>出生点标定</b>：把当前视角设为「<span id="mg-tools-scene">1 层</span>」按钮对应的出生点，设置保存在本机浏览器，下次点该按钮自动生效；「复制位姿 URL」可把机位直接发给第三方。</p>
+      <div class="mg-toolrow">
+        <button type="button" class="mg-toolbtn" id="mg-save-spawn">设为出生点</button>
+        <button type="button" class="mg-toolbtn" id="mg-copy-spawn">复制位姿 URL</button>
+        <button type="button" class="mg-toolbtn" id="mg-reset-spawn">恢复默认</button>
+      </div>
+      <pre id="mg-spawn-info">载入中…</pre>
+      <b id="mg-tool-msg"></b>
+    </div>
+  </aside>
+
+  <aside id="mg-lanbox" hidden>
+    <div class="mg-helphd"><b>局域网访问</b><button type="button" id="mg-lanclose" aria-label="关闭">×</button></div>
+    <p class="mg-lantip">服务默认绑定 <code>0.0.0.0</code>，同一局域网内的手机 / 电脑可直接用下面地址打开；页面资源均为相对路径，无需额外配置。</p>
+    <pre id="mg-lan-info">读取中…</pre>
+    <div class="mg-toolrow"><button type="button" class="mg-toolbtn" id="mg-lan-copy">复制局域网地址</button></div>
+    <b id="mg-lan-msg" class="mg-toolmsg"></b>
+  </aside>
+
+  <aside id="mg-minimap" aria-label="三维导航小地图">
+    <div class="mg-mm-hd">
+      <b>导航小地图</b>
+      <span class="mg-mm-scene" id="mg-mm-scene">—</span>
+      <button type="button" id="mg-mm-follow" title="跟随相机">跟随</button>
+      <button type="button" id="mg-mm-mode" title="切换 3D / 俯视">3D</button>
+      <button type="button" id="mg-mm-wall" title="玻璃墙 / 线框墙">玻璃</button>
+      <button type="button" id="mg-mm-reset" title="复位视角">⌖</button>
+      <button type="button" id="mg-mm-min" title="折叠 / 展开">—</button>
+    </div>
+    <canvas id="mg-mm-canvas"></canvas>
+    <div class="mg-mm-ft">
+      <span id="mg-mm-pos">等待相机…</span>
+      <span id="mg-mm-zone">载入导航图…</span>
+    </div>
+  </aside>
+
+  <div id="mg-error" hidden></div>
+</div>
+<script type="module" src="./app.js"></script>
+<!-- 标注编辑模块：常驻桥接（仅 2 KB，不触发即不加载编辑器主体）。
+     父页 index.html 点「标注编辑」后通过 postMessage 动态 import editor/editor.js，
+     浏览态完全零开销、UI 一行不改。 -->
+<script type="module" src="./editor/bridge.js"></script>
+<!-- 3DGS 数字人集成层：只在 ?human=1 时自动加载，否则只挂一个「数字人」入口按钮。
+     模块内部自行等待 window.__viewer 就绪，不改动 app.js / viewer 任何一行。 -->
+<script type="module" src="./human/human-layer.js"></script>
+</body>
+</html>

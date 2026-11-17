@@ -1,0 +1,554 @@
+/**
+ * 3DGS 落点拾取（异步、可降级、支持深度开关）
+ *
+ * 优先级（深度「开」）：
+ *   L1 碰撞 MESH  : MeshCollision.queryRay() —— 官方 PLY+btree 三角网 + BVH，
+ *                    与漫游碰撞体同一份几何，最精确，且天然可求法线。
+ *   L2 高斯深度图 : viewer.picker().pick(nx, ny) —— 注意它是 **Promise**，
+ *                    且参数是 0..1 归一化坐标（引擎 clampPixel 内乘 size）。
+ *                    旧实现把 Promise 当 Vec3 读，深度拾取从未生效。
+ *   L3 参考平面   : 地面 Y=groundY / 相机朝向垂直墙平面。
+ *   L4 相机前悬浮 : 保证任何环境都能落点。
+ *
+ * 深度「关」：所有顶点投影到「本次绘制锁定的平面」（垂直于进入绘制时的相机视线，
+ *   距相机 planeDistance 米）。线 / 面 / 展板因此严格共面，不会因贴不同深度的
+ *   墙面凹凸而扭曲 —— 这是「点线面能画进三维场景」的关键。
+ *
+ * 坐标：PlayCanvas CameraComponent.screenToWorld / worldToScreen 使用
+ *   graphicsDevice.clientRect（CSS 像素），所以屏幕坐标直接用 clientX-rect.left。
+ */
+import { ensureMesh, rayHitMesh, nearestMeshPoint, meshState } from './mesh-pick.js';
+import { resamplePolyline, decalGridPoints } from './schema.js';
+
+function toArray(p) {
+  if (!p) return null;
+  if (Array.isArray(p)) return p.slice(0, 3).map(Number);
+  if (Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) return [p.x, p.y, p.z];
+  if (p.position) return toArray(p.position);
+  if (p.point) return toArray(p.point);
+  return null;
+}
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+function unit(v) { const l = Math.hypot(...v) || 1; return v.map(n => n / l); }
+
+/** 给 Promise 加超时，避免异步拾取器异常时无限挂起 */
+function withTimeout(p, ms) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const t = setTimeout(() => { if (!done) { done = true; reject(new Error('timeout')); } }, ms);
+    Promise.resolve(p).then(
+      v => { if (!done) { done = true; clearTimeout(t); resolve(v); } },
+      e => { if (!done) { done = true; clearTimeout(t); reject(e); } }
+    );
+  });
+}
+
+export function createPicker({ getViewer, getOptions = () => ({}) }) {
+  let eventPicker = null;      // 兼容旧引擎：picker:ready 事件带来的 wrapper
+  let listening = false;
+  let mesh = null;             // MeshCollision 实例
+  let meshPromise = null;      // 后台预热用的 Promise（不阻塞交互）
+  let meshScene = null;
+  let drawPlane = null;        // { point:[x,y,z], n:[x,y,z] } 锁定绘制平面
+  let lastSource = '-';
+
+  function listen() {
+    const v = getViewer();
+    if (!v || listening) return;
+    if (typeof v.events?.on === 'function') {
+      v.events.on('picker:ready', p => { eventPicker = p; });
+      listening = true;
+    }
+  }
+
+  function pickerHandle() {
+    const v = getViewer();
+    if (!v) return eventPicker;
+    // viewer/index.js 的 handle 暴露了延迟 getter（引擎 picker 是懒创建的）
+    const p = typeof v.picker === 'function' ? v.picker() : v.picker;
+    return p || eventPicker;
+  }
+
+  function camera() {
+    const v = getViewer();
+    const cam = v?.app?.root?.findComponent?.('camera');
+    const dev = v?.app?.graphicsDevice;
+    const canvas = dev?.canvas;
+    return cam && canvas ? { cam, dev, canvas } : null;
+  }
+
+  /** 屏幕 CSS 像素 -> 相机世界射线（单位方向，不做 t<=1 截断） */
+  function ray(cam, x, y) {
+    const pos = cam.entity.getPosition();
+    const a = pos.clone(), b = pos.clone();
+    const near = Math.max(0.01, (cam.nearClip || 0.1) + 0.01);
+    cam.screenToWorld(x, y, near, a);
+    cam.screenToWorld(x, y, near + 100, b);
+    const dir = unit([b.x - a.x, b.y - a.y, b.z - a.z]);
+    return { origin: [pos.x, pos.y, pos.z], dir };
+  }
+
+  function axisPlane(origin, dir, axis, value) {
+    const k = axis === 'y' ? 1 : axis === 'x' ? 0 : 2;
+    if (Math.abs(dir[k]) < 1e-6) return null;
+    const t = (value - origin[k]) / dir[k];
+    if (t < 0.05 || t > 500) return null;
+    const p = [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t];
+    p[k] = value;
+    return p;
+  }
+
+  function wallPlane(origin, dir, camFwd, anchor) {
+    const n = unit([camFwd.x || 0, 0, camFwd.z || -1]);
+    const denom = dot(dir, n);
+    if (Math.abs(denom) < 1e-6) return null;
+    const t = dot(sub(anchor, origin), n) / denom;
+    if (t < 0.05 || t > 500) return null;
+    return [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t];
+  }
+
+  function planeIntersect(origin, dir, plane) {
+    const denom = dot(dir, plane.n);
+    if (Math.abs(denom) < 1e-6) return null;
+    const t = dot(sub(plane.point, origin), plane.n) / denom;
+    if (t < 0.05 || t > 500) return null;
+    return [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t];
+  }
+
+  /**
+   * 预加载碰撞 MESH，避免第一次落点等待（ensureMesh 自身按场景缓存 Promise）
+   *
+   * 【关键】这里 **不再 await**。ensureMesh 内部最多轮询 32 次 × 250ms = 8s，
+   * 早期实现把它放在 pickAsync 的热路径里 await，导致用户点一下后最长
+   * 8 秒没有任何反馈（表现为「显示不及时 / 卡住」）。
+   * 现在改成：后台预热 + 命中缓存，MESH 就绪后 pickAsync 自然走 L1。
+   */
+  function warmup(scene) {
+    listen();
+    if (!scene) return Promise.resolve(mesh);
+    if (meshPromise && meshScene === scene) return meshPromise;
+    meshScene = scene;
+    meshPromise = ensureMesh(scene, getViewer)
+      .then(m => { mesh = m; return m; })
+      .catch(() => null);
+    return meshPromise;
+  }
+
+  /**
+   * 同步落点（不等任何异步资源）
+   *
+   * 用于「鼠标移动时的即时预览」：每帧跟随光标的落点必须零延迟，
+   * 走异步拾取（深度图 Promise / MESH 轮询）必然掉帧。
+   * 只用「已就绪的 MESH 同步射线求交」+ 参考平面兜底。
+   */
+  function pickSync(clientX, clientY) {
+    const ctx = camera();
+    if (!ctx) return null;
+    const { cam, canvas } = ctx;
+    const rect = canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+
+    const opt = getOptions();
+    const { origin, dir } = ray(cam, x, y);
+    const fwd = cam.entity.forward;
+
+    if (opt.depthOn === false) {
+      // 深度关：与正式落点一致，落在锁定的绘制平面上
+      if (drawPlane) {
+        const p = planeIntersect(origin, dir, drawPlane);
+        if (p) return { pos: p, source: 'plane' };
+      }
+    } else {
+      const hit = rayHitMesh(mesh, origin, dir, 300);
+      if (hit) return { pos: hit.pos, source: 'mesh', normal: hit.normal };
+    }
+    const g = axisPlane(origin, dir, 'y', Number(opt.groundY ?? -0.644));
+    if (g) return { pos: g, source: 'ground' };
+    const w = wallPlane(origin, dir, fwd, opt.wallAnchor || [0, 0, 0]);
+    if (w) return { pos: w, source: 'wall' };
+    const d = Number(opt.freeDistance ?? 3);
+    return { pos: origin.map((v, i) => v + dir[i] * d), source: 'fallback' };
+  }
+
+  /**
+   * 屏幕位置 -> 最近的碰撞 MESH 表面点（供展板引线锚点拖拽吸附）
+   *
+   * 三级策略，保证「拖到哪儿都尽量贴在模型上」：
+   *   L1 光标处主射线命中 MESH —— 直接吸附，零偏移；
+   *   L2 主射线落空（擦过物体边缘 / 落在空隙）时，在光标周围按半径递增
+   *      环形投射 12 条辅助射线，取**离光标最近**的一处 MESH 命中；
+   *   L3 全部射线都落空时，用三角网空间哈希查「离同步落点最近的三角面」，
+   *      把自由落点投影到真实表面上。
+   * 返回 snapped 标记，便于 UI 提示 / 自动化回归判断吸附是否真的发生。
+   * 全程同步（只查已就绪的 BVH），拖动过程不会因等待异步资源而卡顿。
+   */
+  function snapToMesh(clientX, clientY) {
+    const ctx = camera();
+    if (!ctx) return null;
+    const { cam, canvas } = ctx;
+    const rect = canvas.getBoundingClientRect();
+    const cast = (sx, sy) => {
+      const x = sx - rect.left, y = sy - rect.top;
+      if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+      const { origin, dir } = ray(cam, x, y);
+      return rayHitMesh(mesh, origin, dir, 400);
+    };
+    const primary = cast(clientX, clientY);
+    if (primary) return { ...primary, snapped: true, source: 'mesh', offsetPx: 0 };
+
+    for (const r of [7, 14, 24, 38]) {
+      for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * Math.PI * 2;
+        const h = cast(clientX + Math.cos(a) * r, clientY + Math.sin(a) * r);
+        if (h) return { ...h, snapped: true, source: 'mesh', offsetPx: r };
+      }
+    }
+    const fallback = pickSync(clientX, clientY);
+    if (!fallback) return null;
+    const near = nearestMeshPoint(mesh, fallback.pos, 4);
+    if (near) return { ...near, snapped: true, source: 'mesh', offsetPx: -1 };
+    return { ...fallback, snapped: false };
+  }
+
+  /**
+   * 把一个世界点垂直投影到脚下最近的碰撞 MESH 表面（动线贴地用）。
+   *
+   * 【天花板 Bug —— 已修】旧版从 `p.y + 4m` 往下打 10m 射线：展厅层高通常
+   * 3~3.5m，射线起点已经在天花板上方，第一个命中就是天花板而不是脚下地面。
+   * 垂直射线的 XZ 自洽校验又永远成立，于是绘制中的草稿看着正常、双击结束后
+   * 整条动线被吸到天花板上「乱飞」。
+   *
+   * 现在只从采样点上方 `up=0.18m` 向下找 2.5m 内的表面，并强制要求命中点
+   * **不高于采样点**（天花板命中一律丢弃）；再配合 drapePolyline 的垂直位移
+   * 上限做二次保险。XZ 自洽校验继续保留，防 mock 固定返回值把线吸塌成一点。
+   */
+  function drapeSurface(p, up = 0.18) {
+    if (!mesh || !Array.isArray(p) || p.length < 3) return null;
+    const ok = (q) => !!q && Math.hypot(q[0] - p[0], q[2] - p[2]) < 0.5 &&
+      q[1] <= p[1] + up + 0.02 && q[1] >= p[1] - 2.5;
+    const hit = rayHitMesh(mesh, [p[0], p[1] + up, p[2]], [0, -1, 0], 2.5);
+    if (ok(hit?.pos)) return hit.pos;
+    // 采样点略微陷入表面（深度噪声）时，从下方 0.45m 向上找最近一层，
+    // 射线最长 0.7m，够不到天花板。
+    const under = rayHitMesh(mesh, [p[0], p[1] - 0.45, p[2]], [0, 1, 0], 0.7);
+    if (ok(under?.pos)) return under.pos;
+    // 竖直墙面 / 屋檐下：最近三角面兜底
+    const near = nearestMeshPoint(mesh, p, 0.8);
+    if (ok(near?.pos)) return near.pos;
+    return null;
+  }
+
+  /**
+   * 折线贴合模型：先按 step 米等距重采样（长直段跨台阶 / 坡道也必须补点），
+   * 再逐点垂直吸附到 MESH 表面。返回值与相机无关，可整段缓存，
+   * 因此只在顶点 / 带宽 / MESH 就绪状态变化时重算，不会每帧打几百条射线。
+   */
+  function drapePolyline(points, step = 0.45) {
+    const dense = resamplePolyline(points, step);
+    return dense.map(p => {
+      const q = drapeSurface(p);
+      // 二次保险：任何 >1.5m 的垂直跳变都判为错误吸附（天花板 / 远处另一层），
+      // 宁可保留原始落点，也不能让整条线飞走。
+      return q && Math.abs(q[1] - p[1]) <= 1.5 ? q : p;
+    });
+  }
+
+  /**
+   * 贴面矩形：把切平面上的规则网格逐点吸附到碰撞 MESH 表面。
+   *
+   * 每个网格点沿「表面法向反方向」打一条射线（起点抬到表面上方 up 米），
+   * 命中点必须同时满足：
+   *   · 沿法向的偏移有限（|along| < up+3）—— 排除打到远处另一面墙；
+   *   · 垂直于法向的横向偏移 < 0.6 m —— 排除擦边斜射 / mock 固定返回值。
+   * 落空时用三角网最近点兜底，再不行就保留切平面原点。
+   * 结果 lift 米沿法向抬起，避免与模型共面穿插（DOM/SVG 叠加层的等效偏移）。
+   * 与相机无关，可整块缓存，绝不每帧打几百条射线。
+   */
+  function drapeQuad(frame, nu = 8, nv = 8, lift = 0.02) {
+    const grid = decalGridPoints(frame, nu, nv);
+    const n = unit(frame.normal || [0, 1, 0]);
+    // 与 drapeSurface 同理：起点只在切平面上方 0.25m，绝不能抬到 3.5m ——
+    // 那样第一个命中会是天花板，整块贴面被吸到屋顶。
+    const up = 0.25;
+    const validate = (hitPos, p) => {
+      const d = sub(hitPos, p);
+      const along = dot(d, n);
+      const lateral = Math.hypot(d[0] - n[0] * along, d[1] - n[1] * along, d[2] - n[2] * along);
+      return along <= up + 0.02 && along >= -2.5 && lateral < 0.6;
+    };
+    const pts = grid.points.map((p) => {
+      if (!mesh) return p.slice();
+      const origin = [p[0] + n[0] * up, p[1] + n[1] * up, p[2] + n[2] * up];
+      const down = [-n[0], -n[1], -n[2]];
+      const hit = rayHitMesh(mesh, origin, down, 2.8);
+      let target = null;
+      if (hit && validate(hit.pos, p)) target = hit.pos;
+      if (!target) {
+        const near = nearestMeshPoint(mesh, p, 1.2);
+        if (near && validate(near.pos, p)) target = near.pos;
+      }
+      const q = target || p;
+      return [q[0] + n[0] * lift, q[1] + n[1] * lift, q[2] + n[2] * lift];
+    });
+    return { points: pts, nu: grid.nu, nv: grid.nv, idx: grid.idx };
+  }
+
+  /** 该世界点是否被前方模型遮挡（逐注记深度检测）。
+   *  命中点必须落在「相机 → 标注」这条视线上，否则忽略（防 mock 固定值误伤）。 */
+  function occluded(worldPoint) {
+    const ctx = camera();
+    if (!ctx || !mesh || !Array.isArray(worldPoint)) return false;
+    const cp = ctx.cam.entity.getPosition();
+    const o = [cp.x, cp.y, cp.z];
+    const v = [worldPoint[0] - o[0], worldPoint[1] - o[1], worldPoint[2] - o[2]];
+    const dist = Math.hypot(v[0], v[1], v[2]);
+    if (dist < 0.8) return false;
+    const dir = v.map(n => n / dist);
+    const hit = rayHitMesh(mesh, o, dir, dist - 0.4);
+    if (!hit) return false;
+    const t = (hit.pos[0] - o[0]) * dir[0] + (hit.pos[1] - o[1]) * dir[1]
+      + (hit.pos[2] - o[2]) * dir[2];
+    const off = Math.hypot(
+      hit.pos[0] - (o[0] + dir[0] * t),
+      hit.pos[1] - (o[1] + dir[1] * t),
+      hit.pos[2] - (o[2] + dir[2] * t)
+    );
+    return off < 0.45 && t < dist - 0.4;
+  }
+
+  /**
+   * @returns {Promise<{pos:number[], source:string, normal?:number[]}|null>}
+   */
+  async function pickAsync(clientX, clientY) {
+    listen();
+    const ctx = camera();
+    if (!ctx) return null;
+    const { cam, canvas } = ctx;
+    const rect = canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+
+    const opt = getOptions();
+    const depthOn = opt.depthOn !== false;
+    const { origin, dir } = ray(cam, x, y);
+    const fwd = cam.entity.forward;
+    const out = (pos, source, normal) => {
+      lastSource = source;
+      return normal ? { pos, source, normal } : { pos, source };
+    };
+
+    if (!depthOn) {
+      // 关闭深度：锁定一张垂直于「开始绘制时视线」的平面，全部顶点共面
+      if (!drawPlane) {
+        const n = unit([fwd?.x || 0, fwd?.y || 0, fwd?.z || -1]);
+        const d = Number(opt.planeDistance ?? 6);
+        drawPlane = { point: origin.map((v, i) => v + n[i] * d), n };
+      }
+      const p = planeIntersect(origin, dir, drawPlane);
+      if (p) return out(p, 'plane');
+    } else {
+      // L1 碰撞 MESH 优先（有真实三角形就用真实三角形求交）
+      // 注意：这里 **绝不 await warmup()**。碰撞体是异步加载的，
+      // 在热路径里等它会让一次点击卡住最多 8 秒。
+      // 预热在 mount 时就后台启动了，MESH 就绪后本分支自然命中。
+      if (!mesh && opt.scene && !meshPromise) warmup(opt.scene);
+      const hit = rayHitMesh(mesh, origin, dir, 300);
+      if (hit) return out(hit.pos, 'mesh', hit.normal);
+
+      // L2 高斯深度图（异步 + 归一化坐标）；加超时兜底，避免拾取器卡死时无限等待
+      const ph = pickerHandle();
+      if (ph && typeof ph.pick === 'function') {
+        try {
+          const raw = await withTimeout(Promise.resolve(ph.pick(x / rect.width, y / rect.height)), 900);
+          const p = toArray(raw);
+          if (p && p.every(Number.isFinite)) {
+            const d = Math.hypot(...sub(p, origin));
+            if (d > 0.05 && d < 500) return out(p, 'depth');
+          }
+        } catch (_) { /* 深度图不可用，继续降级 */ }
+      }
+
+      // L3 参考平面：地面 / 相机朝向的垂直墙
+      const g = axisPlane(origin, dir, 'y', Number(opt.groundY ?? -0.644));
+      if (g) return out(g, 'ground', [0, 1, 0]);
+      const w = wallPlane(origin, dir, fwd, opt.wallAnchor || [0, 0, 0]);
+      if (w) return out(w, 'wall');
+    }
+
+    // L4 相机前方固定距离，保证永远能落点
+    const d = Number(opt.freeDistance ?? 3);
+    return out(origin.map((v, i) => v + dir[i] * d), depthOn ? 'fallback' : 'free');
+  }
+
+  /**
+   * 【深度反算】单个屏幕像素 -> 世界表面点。
+   *
+   * 优先用引擎自带的高斯深度拾取器：它读取 3DGS 帧的深度缓冲，
+   * 由 `screen(x, y) + depth` 反投影出该像素**真正看到的表面**世界坐标
+   * （viewer/index.js 的 Picker.pick(nx, ny) -> getWorldPoint）。
+   * 深度图不可用时退化为「同屏幕点的相机射线 × 碰撞 MESH / 参考平面」，
+   * 保证无 GPU / 老引擎 / headless 环境下也能产出可用的表面网格。
+   *
+   * 与 drapeSurface 的关键区别：这里射线是**从相机沿视线**打出去的，
+   * 命中一定是用户眼前那层表面，绝不会像垂直向下射线那样先撞到天花板。
+   */
+  async function depthUnproject(clientX, clientY, opt = {}) {
+    const ctx = camera();
+    if (!ctx) return null;
+    const { cam, canvas } = ctx;
+    const cr = canvas.getBoundingClientRect();
+    const x = clientX - cr.left, y = clientY - cr.top;
+    if (x < 0 || y < 0 || x > cr.width || y > cr.height) return null;
+    listen();
+    const ph = pickerHandle();
+    const pickTimeout = Math.max(500, Number(opt.pickTimeout) || 900);
+    if (ph && typeof ph.pick === 'function') {
+      try {
+        const raw = await withTimeout(Promise.resolve(ph.pick(x / cr.width, y / cr.height)), pickTimeout);
+        const p = toArray(raw);
+        if (p && p.every(Number.isFinite)) {
+          const { origin } = ray(cam, x, y);
+          const d = Math.hypot(...sub(p, origin));
+          if (d > 0.05 && d < 500) return { pos: p, source: 'depth' };
+        }
+      } catch (_) { /* 深度图不可用，走下面的等价射线 */ }
+    }
+    const { origin, dir } = ray(cam, x, y);
+    const hit = rayHitMesh(mesh, origin, dir, 300);
+    if (hit) return { pos: hit.pos, source: 'mesh', normal: hit.normal };
+    const g = axisPlane(origin, dir, 'y', Number(getOptions().groundY ?? -0.644));
+    if (g) return { pos: g, source: 'ground', normal: [0, 1, 0] };
+    return { pos: origin.map((v, i) => v + dir[i] * 3), source: 'free' };
+  }
+
+  /** 网格里偶发的空采样（深度图空洞 / 射线落空）用最近的有效邻居补齐 */
+  function fillGridGaps(points, U, V) {
+    const at = (i, j) => points[j * (U + 1) + i];
+    for (let j = 0; j <= V; j++) {
+      for (let i = 0; i <= U; i++) {
+        if (at(i, j)) continue;
+        let best = null, bestD = Infinity;
+        for (let jj = 0; jj <= V; jj++) {
+          for (let ii = 0; ii <= U; ii++) {
+            const q = at(ii, jj);
+            if (!q) continue;
+            const d = (ii - i) * (ii - i) + (jj - j) * (jj - j);
+            if (d < bestD) { bestD = d; best = q; }
+          }
+        }
+        points[j * (U + 1) + i] = best ? best.slice() : [0, 0, 0];
+      }
+    }
+  }
+
+  /**
+   * 【贴面矩形的核心】把屏幕上框出的归一化矩形逐点深度反算成世界表面网格。
+   *
+   *  · rectUV 是 [u0,v0,u1,v1]（0..1，相对 canvas），与窗口分辨率无关；
+   *  · 输出 (nu+1)×(nv+1) 个世界点，行优先；每个点独立取自该像素的深度，
+   *    所以墙面凹凸 / 台阶 / 斜顶都会真实弯折，而不是一张悬空平面；
+   *  · 结果写进注记的 surface 字段持久化，之后每帧只需重新投影这些世界点，
+   *    相机移动时贴面会保持贴在模型上；
+   *  · 分块并发（每批 6 条）避免一次性把上百个 GPU readback 塞进拾取队列。
+   */
+  async function unprojectRect(rectUV, nu = 8, nv = 8, opts = {}) {
+    const ctx = camera();
+    if (!ctx || !Array.isArray(rectUV) || rectUV.length !== 4) return null;
+    const cr = ctx.canvas.getBoundingClientRect();
+    if (!cr.width || !cr.height) return null;
+    const U = Math.max(1, Math.min(24, Math.round(nu)));
+    const V = Math.max(1, Math.min(24, Math.round(nv)));
+    let [u0, v0, u1, v1] = rectUV.map(Number);
+    if (![u0, v0, u1, v1].every(Number.isFinite)) return null;
+    if (u1 < u0) [u0, u1] = [u1, u0];
+    if (v1 < v0) [v0, v1] = [v1, v0];
+    u0 = Math.max(0, Math.min(1, u0)); u1 = Math.max(0, Math.min(1, u1));
+    v0 = Math.max(0, Math.min(1, v0)); v1 = Math.max(0, Math.min(1, v1));
+    if (u1 - u0 < 0.01) u1 = Math.min(1, u0 + 0.01);
+    if (v1 - v0 < 0.01) v1 = Math.min(1, v0 + 0.01);
+
+    const jobs = [];
+    for (let j = 0; j <= V; j++) {
+      for (let i = 0; i <= U; i++) {
+        jobs.push({
+          i, j,
+          x: cr.left + (u0 + (u1 - u0) * i / U) * cr.width,
+          y: cr.top + (v0 + (v1 - v0) * j / V) * cr.height,
+        });
+      }
+    }
+    const points = new Array(jobs.length).fill(null);
+    const stats = {};
+    const pickTimeout = Math.max(500, Number(opts.pickTimeout) || 900);
+    for (let off = 0; off < jobs.length; off += 6) {
+      const batch = jobs.slice(off, off + 6);
+      const hits = await Promise.all(batch.map(s => depthUnproject(s.x, s.y, { pickTimeout })));
+      batch.forEach((s, k) => {
+        const h = hits[k];
+        points[s.j * (U + 1) + s.i] = h ? h.pos : null;
+        if (h) stats[h.source] = (stats[h.source] || 0) + 1;
+      });
+    }
+    fillGridGaps(points, U, V);
+    const dominant = Object.keys(stats).sort((a, b) => stats[b] - stats[a])[0] || 'free';
+    return {
+      rect: [u0, v0, u1, v1], nu: U, nv: V, points,
+      source: dominant, samples: points.length, stats,
+    };
+  }
+
+  return {
+    pickAsync,
+    // 兼容同步调用方：仍返回 Promise，请优先用 pickAsync
+    pick: pickAsync,
+    /** 深度反算：单个屏幕点 / 整块屏幕矩形 -> 世界表面（贴面矩形用） */
+    depthUnproject,
+    unprojectRect,
+    /** 同步落点：给「光标跟随预览」用，零等待 */
+    pickSync,
+    /** 吸附到最近碰撞 MESH：给「展板引线锚点拖拽」用 */
+    snapToMesh,
+    /** 折线贴合模型表面：动线（line）渲染用，结果与相机无关、可缓存 */
+    drapePolyline,
+    drapeSurface,
+    /** 贴面矩形网格逐点吸附 MESH 表面（decal 渲染用，可缓存） */
+    drapeQuad,
+    /** 逐注记深度检测：该世界点是否被前方模型挡住 */
+    occluded,
+    /**
+     * 贴合缓存版本号：MESH 就绪 / 三角面数 / 表面高度任一变化都要重算。
+     * 只比三角面数不够 —— 换模型或换 LOD 时面数可能恰好相同，表面却完全不同，
+     * 那会让动线与贴面矩形继续沿用旧的吸附结果（贴在空气里）。
+     * 三个固定 XZ 的垂直探针每帧只有 3 条射线，足以代表「表面变了」。
+     */
+    get drapeVersion() {
+      if (!mesh) return 0;
+      const tris = mesh.triangles?.count || 1;
+      let probe = '';
+      try {
+        for (const [x, z] of [[0, 0], [3.25, 3.25], [-2.5, 7.75]]) {
+          // 探针也要贴着人眼高度往下打，从 24m 高空只会命中屋顶
+          const h = rayHitMesh(mesh, [x, 2.2, z], [0, -1, 0], 8);
+          probe += (h ? h.pos[1].toFixed(2) : 'x') + ',';
+        }
+      } catch (_) { probe = 'err,'; }
+      return tris + '|' + probe;
+    },
+    warmup,
+    /** 开始 / 结束一次「线面展板」绘制：重置锁定平面 */
+    beginStroke() { drawPlane = null; },
+    endStroke() { drawPlane = null; },
+    get drawPlaneLocked() { return !!drawPlane; },
+    get lastSource() { return lastSource; },
+    get depthReady() { listen(); return !!pickerHandle(); },
+    /** 暴露引擎 Picker（供 decal-projection 取实时表面深度纹理 renderView） */
+    enginePicker: () => pickerHandle(),
+    get meshReady() { return !!mesh; },
+    meshInfo: (scene) => meshState(scene),
+    get meshTriangles() { try { return mesh?.triangles?.count || 0; } catch (_) { return 0; } },
+  };
+}

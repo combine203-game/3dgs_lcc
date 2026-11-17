@@ -1,0 +1,26 @@
+# 换行策略：仓库内统一存 LF，工作区按平台检出
+# 默认：文本文件 LF 检出、LF 提交（不随平台变化）
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd.exe 解析异常
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制资产，明确禁止行尾转换
+*.onnx binary
+*.wasm binary
+*.sog binary
+*.ply binary
+*.btree binary
+*.mp4 binary
+*.webm binary
+*.glb binary
+*.jpg binary
+*.png binary
+*.zip binary
+
+# 差异工具友好：把 .mjs/.js 标为 JS，.md 标为 Markdown
+*.mjs diff=javascript
+*.js diff=javascript
+*.md diff=markdown
+*.json diff=json

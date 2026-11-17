@@ -1,0 +1,67 @@
+{
+  "diag": {
+    "managerEnabled": true,
+    "instanceExists": true,
+    "instanceVisible": true,
+    "renderableExists": true,
+    "renderableVisible": true,
+    "hasProjector": true,
+    "demoMode": true,
+    "materialExists": true,
+    "materialType": "ShaderMaterial",
+    "pickReady": true,
+    "pickSize": [
+      1258,
+      650
+    ],
+    "pickFormat": "rgba16f",
+    "degraded": false,
+    "gpuErrors": 0,
+    "options": {
+      "boxScale": 1,
+      "depthMode": 1,
+      "debugMode": 0
+    },
+    "dpr": 1,
+    "backend": "webgpu",
+    "isWebGPU": true,
+    "paramKeys": [
+      "decalEdge",
+      "decalHalf",
+      "decalOpacity",
+      "farClip",
+      "invProjector",
+      "invViewProj",
+      "nearClip",
+      "pickDepth",
+      "projectorNormal",
+      "uBoxScale",
+      "uCameraPos",
+      "uCull",
+      "uDebugMode",
+      "uDepthMode",
+      "uPickFlipY",
+      "uPickReady",
+      "uPickSize",
+      "uResolution",
+      "uUVOffsetY",
+      "uUVSignY",
+      "uVideoSize",
+      "videoTex"
+    ],
+    "uPickReady": 0,
+    "uBoxScale": 1,
+    "uDepthMode": 1,
+    "hasPickDepth": true,
+    "hasVideoTex": true,
+    "invViewProjType": "object",
+    "invViewProjLen": 16,
+    "invProjectorLen": 16
+  },
+  "logs": [
+    {
+      "type": "log",
+      "text": "Renderer: webgpu"
+    }
+  ]
+}

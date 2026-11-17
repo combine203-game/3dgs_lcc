@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>MotionBricks 动作驱动自检</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #12151c; color: #e8edf5;
+    font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; overflow: hidden; }
+  #c { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 16px; top: 16px; padding: 12px 14px; border-radius: 10px;
+    background: rgba(10, 14, 20, .72); border: 1px solid rgba(120, 160, 220, .28); min-width: 240px; }
+  #hud h1 { margin: 0 0 6px; font-size: 14px; font-weight: 600; letter-spacing: .5px; }
+  #hud .row { display: flex; justify-content: space-between; gap: 16px; font-variant-numeric: tabular-nums; }
+  #hud .k { color: #8fa3bd; }
+  #hud .bad { color: #ff8a80; } #hud .good { color: #7ee2a8; }
+  #btns { position: fixed; left: 16px; bottom: 18px; display: flex; gap: 8px; }
+  #btns button { padding: 8px 18px; border-radius: 8px; cursor: pointer;
+    background: rgba(30, 40, 56, .9); color: #dce7f5; border: 1px solid rgba(120, 160, 220, .35); font-size: 13px; }
+  #btns button.on { background: #2f6feb; border-color: #5b96ff; color: #fff; }
+  #btns button:disabled { opacity: .4; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <h1>MotionBricks 动作驱动</h1>
+  <div class="row"><span class="k">状态</span><span id="s-state">初始化…</span></div>
+  <div class="row"><span class="k">后端</span><span id="s-backend">-</span></div>
+  <div class="row"><span class="k">模型</span><span id="s-model">-</span></div>
+  <div class="row"><span class="k">步态</span><span id="s-gait">stand</span></div>
+  <div class="row"><span class="k">推理</span><span id="s-gen">0 ms</span></div>
+  <div class="row"><span class="k">根位移</span><span id="s-hips">0.000 m</span></div>
+  <div class="row"><span class="k">手臂角</span><span id="s-arm">0°</span></div>
+  <div class="row"><span class="k">错误</span><span id="s-err">-</span></div>
+</div>
+<div id="btns">
+  <button id="btn-stand" class="on">stand</button>
+  <button id="btn-walk">walk</button>
+  <button id="btn-run">run</button>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.js",
+    "three/addons/": "./vendor/three/addons/",
+    "three-motionbricks": "./vendor/three-motionbricks/index.mjs"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MotionDriver } from './motion-driver.js';
+
+/* ------------------------------------------------------------------ 测试句柄 */
+const log = [];
+const t0 = performance.now();
+function note(msg) {
+  const line = `[${((performance.now() - t0) / 1000).toFixed(2)}s] ${msg}`;
+  log.push(line);
+  if (log.length > 200) log.shift();
+  console.log('[test]', line);
+}
+
+const state = {
+  ready: false,       // create() 已返回（无论是否成功，失败也置 true，用 error 区分）
+  bound: false,       // 已 bindCharacter
+  error: null,
+  frames: 0,
+  hipsMoved: 0,       // hips 世界坐标相对初始位置的最大位移（米）
+  hipsDelta: 0,       // 最近一次相对上一帧的位移
+  hipsPos: null,
+  genMs: 0,
+  armAngle: 0,        // 左上臂与竖直向下方向的夹角（度）
+  armDown: [0, 0],    // 左右上臂竖直分量（1=自然下垂，0=平举）
+  bindPoseHold: 0,    // 连续「接近绑定姿态」帧数（滞回用）
+  bindDev: 0,         // 与 GLB 绑定姿态的最大骨骼夹角（度）
+  tpose: false,       // 连续 6 帧贴近绑定姿态才算 T-pose
+  hipsY: { min: Infinity, max: -Infinity },  // hips 世界高度波动（米）
+};
+
+/**
+ * ?model=<单个 .onnx 或 pack 目录>&rig=soma|g1&backend=auto|wasm|webgpu
+ * 默认：SOMA q8h 单个 .onnx。
+ */
+const QS = new URLSearchParams(location.search);
+const MODEL_URL = QS.get('model') || './model/mmm_v6_soma_q8h.onnx';
+const RIG = QS.get('rig') || 'soma';
+const BACKEND = QS.get('backend') || 'auto';
+const MATCH_SIZE = QS.get('matchSize') !== '0'; // ?matchSize=0 保持模型原始身高
+
+let driver = null;
+let hipsNode = null;
+let armNode = null;      // 左上臂
+let forearmNode = null;  // 左前臂
+let armNodeR = null;     // 右上臂
+let forearmNodeR = null; // 右前臂（左右一起判 T-pose）
+let hipsStart = null;
+let hipsPrev = null;
+/** 骨骼名 → GLB 绑定姿态局部四元数（判定「是否回到 T-pose」的基准） */
+const bindPose = new Map();
+const _q = new THREE.Quaternion();
+
+/** 当前姿态与绑定姿态的最大骨骼夹角（度）：接近 0 就是回到 T-pose */
+function bindPoseDeviation(root) {
+  let max = 0;
+  root.traverse((o) => {
+    if (!o.isBone) return;
+    const q0 = bindPose.get(o.name);
+    if (!q0) return;
+    const d = 2 * Math.acos(Math.min(1, Math.abs(_q.copy(q0).invert().multiply(o.quaternion).w)));
+    const deg = d * 180 / Math.PI;
+    if (deg > max) max = deg;
+  });
+  return max;
+}
+
+/** 骨骼 a → b 的世界方向（单位向量） */
+function dir(a, b) {
+  const pa = a.getWorldPosition(new THREE.Vector3());
+  const pb = b.getWorldPosition(new THREE.Vector3());
+  return pb.sub(pa).normalize();
+}
+
+/** 重新取基线：绑定/换步态都会让姿态跳一下，不清零会把「静止跳变」误当成运动 */
+function resetHips() {
+  hipsStart = null;
+  hipsPrev = null;
+  state.hipsMoved = 0;
+  state.hipsDelta = 0;
+}
+
+/* ------------------------------------------------------------------ 场景 */
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.setSize(innerWidth, innerHeight, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = false;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x12151c);
+scene.fog = new THREE.Fog(0x12151c, 12, 34);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(2.4, 1.7, 3.2);
+camera.lookAt(0, 0.95, 0);
+
+scene.add(new THREE.HemisphereLight(0xbcd3ff, 0x1b2230, 2.0));
+const key = new THREE.DirectionalLight(0xffffff, 1.7);
+key.position.set(3, 6, 4);
+scene.add(key);
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(40, 40),
+  new THREE.MeshStandardMaterial({ color: 0x2a3242, roughness: 0.95, metalness: 0 }),
+);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.001;
+scene.add(ground);
+const grid = new THREE.GridHelper(40, 80, 0x3d4b63, 0x252d3b);
+scene.add(grid);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight, false);
+});
+
+/* ------------------------------------------------------------------ UI */
+const el = {
+  state: document.getElementById('s-state'),
+  backend: document.getElementById('s-backend'),
+  model: document.getElementById('s-model'),
+  gait: document.getElementById('s-gait'),
+  gen: document.getElementById('s-gen'),
+  hips: document.getElementById('s-hips'),
+  arm: document.getElementById('s-arm'),
+  err: document.getElementById('s-err'),
+};
+const btn = {
+  stand: document.getElementById('btn-stand'),
+  walk: document.getElementById('btn-walk'),
+  run: document.getElementById('btn-run'),
+};
+
+const DRIVE_DIR = new THREE.Vector3(0, 0, -1); // 世界方向（-Z 为相机前方）
+let currentGait = 'stand';
+
+function applyGait(g) {
+  currentGait = g;
+  for (const k of ['stand', 'walk', 'run']) btn[k].classList.toggle('on', k === g);
+  el.gait.textContent = g;
+  if (!driver) return;
+  driver.setGait(g);
+  if (g === 'stand') driver.drive(null);
+  else driver.drive(DRIVE_DIR, g);  // walk/run 按钮同时给方向：验证根位移与生成
+  resetHips();                      // 步态切换后的位移才算「骨架真实运动」
+  note(`切换步态 -> ${g}`);
+}
+btn.stand.addEventListener('click', () => applyGait('stand'));
+btn.walk.addEventListener('click', () => applyGait('walk'));
+btn.run.addEventListener('click', () => applyGait('run'));
+
+function setButtonsEnabled(on) {
+  for (const k of ['stand', 'walk', 'run']) btn[k].disabled = !on;
+}
+setButtonsEnabled(false);
+
+/* ------------------------------------------------------------------ 载入角色 */
+function findBone(root, re) {
+  let found = null;
+  root.traverse((o) => { if (!found && re.test(o.name)) found = o; });
+  return found;
+}
+// Mixamo: mixamorig:Hips / mixamorigHips；兼容无前缀
+const HIPS_RE = /^mixamorig:?hips$/i;
+const ARM_RE = /^mixamorig:?leftarm$/i;
+const FOREARM_RE = /^mixamorig:?leftforearm$/i;
+const ARM_R_RE = /^mixamorig:?rightarm$/i;
+const FOREARM_R_RE = /^mixamorig:?rightforearm$/i;
+const findHips = (root) => findBone(root, HIPS_RE);
+
+async function boot() {
+  const loader = new GLTFLoader();
+  let gltf;
+  try {
+    gltf = await loader.loadAsync('./assets/astronaut.glb');
+    note(`astronaut.glb 载入：${gltf.scene.children.length} 个根节点`);
+  } catch (e) {
+    state.error = '模型加载失败: ' + (e?.message || e);
+    note(state.error);
+    el.state.textContent = '失败';
+    el.err.textContent = state.error;
+    state.ready = true;
+    return;
+  }
+
+  // 先挂到场景里，模型包没下完时也能看到绑定姿态的化身
+  gltf.scene.position.set(0, 0, 0);
+  scene.add(gltf.scene);
+  hipsNode = findHips(gltf.scene);
+  note(hipsNode ? `hips 骨骼：${hipsNode.name}` : '未找到 hips 骨骼');
+  // 记录 GLB 绑定姿态（T-pose）的每根骨骼局部旋转：之后用它判定「骨骼是否回到 T-pose」
+  gltf.scene.traverse((o) => {
+    if (o.isBone) bindPose.set(o.name, o.quaternion.clone());
+  });
+  note(`绑定姿态采样骨骼 ${bindPose.size} 根`);
+  {
+    // 原始（未重定向、未缩放）包围盒：用于核对 RetargetedCharacter matchSize 后的身高
+    const b = new THREE.Box3().setFromObject(gltf.scene);
+    const s = new THREE.Vector3();
+    b.getSize(s);
+    note(`GLB 原始包围盒：宽 ${s.x.toFixed(2)} 高 ${s.y.toFixed(2)} 深 ${s.z.toFixed(2)} m`);
+  }
+
+  driver = await MotionDriver.create({
+    modelUrl: MODEL_URL,
+    rig: RIG,
+    ortUrl: './vendor/ort/ort.webgpu.min.mjs',
+    backend: BACKEND,
+    matchSize: MATCH_SIZE,
+    onProgress: (stage, loaded, total) => {
+      if (stage === 'model' && total) el.model.textContent = `${(loaded / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MiB`;
+      else el.model.textContent = stage;
+    },
+  });
+  state.ready = true;
+  state.error = driver.stats.error;
+  note(`create() 返回：backend=${driver.stats.backend} modelReady=${driver.stats.modelReady} error=${driver.stats.error} stage=${driver.stats.stage}`);
+
+  const obj = driver.bindCharacter(gltf.scene);
+  if (obj) {
+    scene.add(obj);            // setCharacter 会重新挂载 model，这里把它接进场景
+    state.bound = true;
+    hipsNode = findHips(obj) || hipsNode;
+    armNode = findBone(obj, ARM_RE);
+    forearmNode = findBone(obj, FOREARM_RE);
+    armNodeR = findBone(obj, ARM_R_RE);
+    forearmNodeR = findBone(obj, FOREARM_R_RE);
+    resetHips();
+    note(`bindCharacter 完成，子节点 ${obj.children.length} 个；骨骼 hips=${!!hipsNode} arm=${!!armNode}/${!!forearmNode} 右臂=${!!armNodeR}/${!!forearmNodeR}`);
+  }
+
+  if (driver.stats.modelReady) {
+    setButtonsEnabled(true);
+    el.state.textContent = '就绪';
+  } else {
+    el.state.textContent = '模型未就绪';
+    el.err.textContent = driver.stats.error || '模型未就绪';
+  }
+}
+
+/* ------------------------------------------------------------------ 主循环 */
+const clock = new THREE.Clock();
+
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (driver) {
+    try {
+      driver.update(dt);
+    } catch (e) {
+      if (!state.error) {
+        state.error = String(e?.message || e);
+        note('update 异常: ' + state.error);
+      }
+    }
+    state.genMs = driver.stats.genMs || 0;
+  }
+
+  if (hipsNode) {
+    const p = hipsNode.getWorldPosition(new THREE.Vector3());
+    if (!hipsStart) {
+      hipsStart = p.clone();
+      hipsPrev = p.clone();
+    } else {
+      const fromStart = p.distanceTo(hipsStart);
+      if (fromStart > state.hipsMoved) state.hipsMoved = fromStart;
+      state.hipsDelta = p.distanceTo(hipsPrev);
+      hipsPrev.copy(p);
+    }
+    state.hipsPos = { x: +p.x.toFixed(4), y: +p.y.toFixed(4), z: +p.z.toFixed(4) };
+    if (p.y < state.hipsY.min) state.hipsY.min = p.y;
+    if (p.y > state.hipsY.max) state.hipsY.max = p.y;
+  }
+
+  // T-pose 判定：左右上臂（肩→肘）的**竖直分量**。T-pose 双臂平举 → -y≈0；
+  // 自然垂臂 → -y≈1。该判据与角色朝向无关，也不会把跑步摆臂（前后方向）误判。
+  // T-pose 判定：与 GLB 绑定姿态的最大骨骼夹角。真正回到 T-pose 时该值 < 5°；
+  // 只要还在做动作（哪怕手臂水平摆动），关键骨骼偏差都远大于此。
+  if (driver && driver.characterObject && bindPose.size) {
+    const dev = bindPoseDeviation(driver.characterObject);
+    state.bindDev = +dev.toFixed(1);
+    state.bindPoseHold = dev < 5 ? state.bindPoseHold + 1 : 0;
+    state.tpose = state.bindPoseHold >= 6;
+  }
+  if (armNode && forearmNode && armNodeR && forearmNodeR) {
+    const vL = dir(armNode, forearmNode);
+    const vR = dir(armNodeR, forearmNodeR);
+    const downL = -vL.y, downR = -vR.y;
+    state.armDown = [+downL.toFixed(2), +downR.toFixed(2)];
+    state.armAngle = +(Math.acos(Math.min(1, Math.max(-1, downL))) * 180 / Math.PI).toFixed(1);
+  }
+
+  state.frames++;
+
+  // HUD（每 6 帧刷一次，省点开销）
+  if (state.frames % 6 === 0) {
+    const s = driver ? driver.stats : null;
+    el.backend.textContent = s ? s.backend.toUpperCase() : '-';
+    el.model.textContent = s ? (s.modelReady ? '已就绪' : (s.stage || '未就绪')) : '-';
+    el.gen.textContent = `${(state.genMs || 0).toFixed(0)} ms`;
+    el.hips.textContent = `${state.hipsMoved.toFixed(3)} m`;
+    el.arm.textContent = `${state.armAngle.toFixed(0)}°${state.tpose ? ' (T)' : ''}`;
+    if (s?.error) {
+      el.err.textContent = s.error;
+      el.err.className = 'bad';
+    }
+  }
+
+  renderer.render(scene, camera);
+}
+renderer.setAnimationLoop(tick);
+
+/* ------------------------------------------------------------------ 对外句柄 */
+window.__test = {
+  get ready() { return state.ready; },
+  get bound() { return state.bound; },
+  get error() { return (driver && driver.stats.error) || state.error; },
+  get stats() {
+    const extra = {
+      frames: state.frames,
+      hipsMoved: state.hipsMoved,
+      armAngle: state.armAngle,
+      armDown: state.armDown,
+      bindDev: state.bindDev,
+      tpose: state.tpose,
+      hipsY: { min: +state.hipsY.min.toFixed(3), max: +state.hipsY.max.toFixed(3) },
+    };
+    if (driver) return { ...driver.stats, ...extra };
+    return { backend: 'wasm', modelReady: false, genMs: 0, error: state.error, stage: 'boot', ...extra };
+  },
+  get gait() { return currentGait; },
+  get hipsMoved() { return state.hipsMoved; },
+  get hipsPos() { return state.hipsPos; },
+  get armAngle() { return state.armAngle; },
+  get armDown() { return state.armDown; },
+  get bindDev() { return state.bindDev; },
+  get tpose() { return state.tpose; },
+  get hipsY() { return { min: +state.hipsY.min.toFixed(3), max: +state.hipsY.max.toFixed(3) }; },
+  get rig() { return RIG; },
+  get modelUrl() { return MODEL_URL; },
+  /** 截图取证用：站在角色正面取全身像（距离随角色实际高度自适应） */
+  frameCharacter(dist) {
+    if (!hipsNode) return false;
+    const hips = hipsNode.getWorldPosition(new THREE.Vector3());
+    // 用左右上臂连线的横向轴 + 世界上方推出「角色正前方」，与朝向无关
+    let fwd = new THREE.Vector3(0, 0, -1);
+    if (armNode && armNodeR) {
+      const lat = armNodeR.getWorldPosition(new THREE.Vector3())
+        .sub(armNode.getWorldPosition(new THREE.Vector3())).normalize();
+      fwd = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), lat).normalize();
+    }
+    const h = this.bbox ? this.bbox.h : 1.8;
+    const d = dist || Math.max(3.4, h * 2.0);
+    camera.position.copy(hips).addScaledVector(fwd, d).add(new THREE.Vector3(0, h * 0.35, 0));
+    camera.lookAt(hips.x, hips.y + h * 0.08, hips.z);
+    camera.updateProjectionMatrix();
+    note(`取景：hips (${hips.x.toFixed(2)}, ${hips.y.toFixed(2)}, ${hips.z.toFixed(2)}) 正面 ${d.toFixed(1)} m，身高 ${h.toFixed(2)} m`);
+    return true;
+  },
+  /** 角色包围盒（米），用于核对比例与取景（注意：SkinnedMesh 的几何包围盒是绑定姿态，偏大） */
+  get bbox() {
+    const obj = driver && driver.characterObject;
+    if (!obj) return null;
+    const b = new THREE.Box3().setFromObject(obj);
+    const s = new THREE.Vector3();
+    b.getSize(s);
+    return { w: +s.x.toFixed(2), h: +s.y.toFixed(2), d: +s.z.toFixed(2) };
+  },
+  /** 按骨骼量当前姿态身高：头顶骨 y − 脚趾骨 y */
+  measure() {
+    const obj = driver && driver.characterObject;
+    if (!obj) return null;
+    const top = findBone(obj, /^mixamorig:?headtop_end$/i) || findBone(obj, /^mixamorig:?head$/i);
+    const toe = findBone(obj, /^mixamorig:?lefttoebase$/i) || findBone(obj, /^mixamorig:?leftfoot$/i);
+    if (!top || !toe) return null;
+    const ty = top.getWorldPosition(new THREE.Vector3()).y;
+    const fy = toe.getWorldPosition(new THREE.Vector3()).y;
+    return { height: +(ty - fy).toFixed(2), headY: +ty.toFixed(2), toeY: +fy.toFixed(2) };
+  },
+  log,
+  /** 供 CDP 直接调用（等价于点按钮） */
+  setGait: applyGait,
+};
+
+note('页面启动');
+boot().catch((e) => {
+  state.error = String(e?.message || e);
+  state.ready = true;
+  note('boot 失败: ' + state.error);
+});
+</script>
+</body>
+</html>

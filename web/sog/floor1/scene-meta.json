@@ -1,0 +1,211 @@
+{
+  "scene": "floor1",
+  "sourceLcc2": "展示馆1层LCC.lcc2",
+  "sourceLccZip": "展示馆1层LCC.zip",
+  "transform": {
+    "logCompress": "s = sign(v) * ln(1 + |v|)  (per axis)",
+    "entityEulerDeg": [
+      -90,
+      0,
+      0
+    ],
+    "world": "(s.x, s.z, -s.y)"
+  },
+  "totalSplats": 16297143,
+  "lodSplats": [
+    8862771,
+    4119233,
+    1945443,
+    913171,
+    456525
+  ],
+  "lodLevels": 5,
+  "leafCount": 64,
+  "sharedAncestorRefs": 176,
+  "padLeafBound": true,
+  "sceneBoundLocal": {
+    "min": [
+      -4.881766755008739,
+      -4.671015267548521,
+      -2.4899105543312268
+    ],
+    "max": [
+      5.081604761550178,
+      5.256483620323238,
+      4.600182281109799
+    ]
+  },
+  "sceneBound": {
+    "min": [
+      -4.881766755008739,
+      -2.4899105543312268,
+      -5.256483620323238
+    ],
+    "max": [
+      5.081604761550178,
+      4.600182281109799,
+      4.671015267548521
+    ]
+  },
+  "collision": {
+    "source": "collision-manifest.json (raw PLY + btree)",
+    "parts": 16,
+    "fallbackGlb": {
+      "verts": 486433,
+      "tris": 725569,
+      "glb": "collision.glb",
+      "min": [
+        -3.8278257846832275,
+        -0.886052131652832,
+        -3.5416502952575684
+      ],
+      "max": [
+        3.8620445728302,
+        3.1516671180725098,
+        3.969092845916748
+      ]
+    }
+  },
+  "spawnPoint": {
+    "metric": [
+      0.0,
+      0.0,
+      1.6
+    ],
+    "quaternion": [
+      0.7071068,
+      0.0,
+      0.0,
+      0.7071067
+    ],
+    "worldPosition": [
+      0.0,
+      0.9555114450274363,
+      -0.0
+    ],
+    "worldTarget": [
+      0.0,
+      0.9555114450274363,
+      1.098612288668109
+    ],
+    "fov": 75.0
+  },
+  "contentUrl": "./sog/floor1/lod-meta.json",
+  "collisionUrl": "./sog/floor1/collision-manifest.json",
+  "posterUrl": "./sog/floor1/info/thumb.jpg",
+  "defaultSpawnPoint": "floor1",
+  "spawnPointNote": "spawnPoint 是 lcc2 官方出生点，现作为「室外出生点」；spawnPoints.floor1 是 2026-11-09 用户标定的一楼室内接待台机位，现为一楼默认出生点；spawnPoints.indoor 是碰撞墙围合房间 R0 内的旧可选出生点（保留兼容）。2026-11-07 修订：z≈0.5m 连续高层地坪属于室外建筑侧铺装，不再当作室内，原 indoorZone 定义已废弃。",
+  "spawnPoints": {
+    "default": "floor1",
+    "floor1": {
+      "label": "1 层 · 室内接待台（用户标定）",
+      "zone": "lobby",
+      "worldPosition": [18.50247, 1.894326, 17.075218],
+      "worldTarget": [17.583208, 1.892035, 17.468858],
+      "fov": 75.0,
+      "definition": "用户 2026-11-09 提供 ?pos=18.502470,1.894326,17.075218&look=17.583208,1.892035,17.468858；CDP 实拍确认为波浪墙 / 蓝色大屏 / RECEPTION 接待台机位"
+    },
+    "indoor": {
+      "label": "1 层 · 房间内（碰撞墙围合域 R0）",
+      "metric": [
+        13.25,
+        -22.0,
+        2.276
+      ],
+      "worldPosition": [
+        2.656756907,
+        1.186623166,
+        3.135494216
+      ],
+      "worldTarget": [
+        2.565766487,
+        1.155622543,
+        3.036338356
+      ],
+      "fov": 75.0,
+      "zone": "room",
+      "floorHeightM": 0.676,
+      "definition": "官方碰撞 PLY 竖直墙 flood-fill 得到的最大围合房间内点（reach/floor1_wall_rooms.json dilation=6，139.4 m2）"
+    },
+    "outdoor": {
+      "label": "1 层 · 室外（官方原始出生点）",
+      "zone": "outdoor",
+      "metric": [
+        0.0,
+        0.0,
+        1.6
+      ],
+      "worldPosition": [
+        0.0,
+        0.9555114450274363,
+        -0.0
+      ],
+      "worldTarget": [
+        0.0,
+        0.9555114450274363,
+        1.098612288668109
+      ],
+      "fov": 75.0,
+      "quaternion": [
+        0.7071068,
+        0.0,
+        0.0,
+        0.7071067
+      ]
+    }
+  },
+  "roomZone": {
+    "definition": "官方碰撞 PLY 竖直墙投影后 flood-fill 得到的围合房间；门洞取 3DGS 人体高度密度封闭域的缺口",
+    "deprecatedDefinition": "raw PLY z≈0.5m continuous high floor (largest connected component) —— 已废弃：该地坪是室外建筑侧铺装，不是室内",
+    "doorwayMetric": [
+      6.4,
+      -10.0
+    ],
+    "doorwaySource": "reach/floor1_enclosed.json gaps + reach/floor1_gate_probe.json 可达性验证",
+    "rooms": {
+      "R0": {
+        "areaM2": 139.4,
+        "bboxMetric": [
+          4.8,
+          -33.2,
+          21.5,
+          -15.0
+        ],
+        "bestMetric": [
+          13.25,
+          -22.0
+        ],
+        "dilation": 6
+      },
+      "R2": {
+        "areaM2": 46.2,
+        "bboxMetric": [
+          -2.5,
+          -17.0,
+          7.2,
+          -8.8
+        ],
+        "bestMetric": [
+          1.5,
+          -13.75
+        ],
+        "dilation": 2
+      }
+    },
+    "gateRoute": {
+      "pathFile": "walk_path_gate.json",
+      "frames": 300,
+      "gateFrame": 44,
+      "gateMinDistM": 0.09,
+      "roomEnterFrame": 83,
+      "roomFrames": 168,
+      "stageFrames": {
+        "outdoor": 40,
+        "gate": 9,
+        "entry": 83,
+        "room": 168
+      }
+    },
+    "visualCaveat": "1 层 LCC 同时包含室外外立面 / 柱廊 / 无障碍坡道 / 广场，以及 pos≈(18.50,1.89,17.08) 附近的室内接待台大厅（波浪墙 / 蓝色大屏 / RECEPTION 台，见 spawnPoints.floor1）；碰撞墙围合房间 R0 内部没有内墙 / 展板 / 吊顶的实拍表面，按碰撞几何穿门入室的动线成立，但该区域画面仍呈半室外。"
+  }
+}

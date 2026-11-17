@@ -1,0 +1,105 @@
+{
+  "scene": "floor3",
+  "sourceLcc2": "展示馆3层LCC.lcc2",
+  "sourceLccZip": "展示馆3层LCC.zip",
+  "transform": {
+    "logCompress": "s = sign(v) * ln(1 + |v|)  (per axis)",
+    "entityEulerDeg": [
+      -90,
+      0,
+      0
+    ],
+    "world": "(s.x, s.z, -s.y)"
+  },
+  "totalSplats": 4269944,
+  "lodSplats": [
+    2379502,
+    1106072,
+    522974,
+    261396
+  ],
+  "lodLevels": 4,
+  "leafCount": 16,
+  "sharedAncestorRefs": 24,
+  "padLeafBound": true,
+  "sceneBoundLocal": {
+    "min": [
+      -3.067446147042659,
+      -3.4932029282652914,
+      -2.0770760759586664
+    ],
+    "max": [
+      3.6866826976734517,
+      3.6619090673056465,
+      2.8163550522877445
+    ]
+  },
+  "sceneBound": {
+    "min": [
+      -3.067446147042659,
+      -2.0770760759586664,
+      -3.6619090673056465
+    ],
+    "max": [
+      3.6866826976734517,
+      2.8163550522877445,
+      3.4932029282652914
+    ]
+  },
+  "collision": {
+    "source": "collision-manifest.json (raw PLY + btree)",
+    "parts": 8,
+    "fallbackGlb": {
+      "verts": 93528,
+      "tris": 129975,
+      "glb": "collision.glb",
+      "min": [
+        -2.232699155807495,
+        -0.7048206925392151,
+        -2.117760419845581
+      ],
+      "max": [
+        3.6375861167907715,
+        2.265845775604248,
+        3.4577245712280273
+      ]
+    }
+  },
+  "spawnPoint": {
+    "metric": [
+      0.0,
+      0.0,
+      1.6
+    ],
+    "quaternion": [
+      0.7071068,
+      0.0,
+      0.0,
+      0.7071067
+    ],
+    "worldPosition": [
+      0.0,
+      0.9555114450274363,
+      -0.0
+    ],
+    "worldTarget": [
+      0.0,
+      0.9555114450274363,
+      1.098612288668109
+    ],
+    "fov": 75.0
+  },
+  "defaultSpawnPoint": "floor3",
+  "spawnPoints": {
+    "default": "floor3",
+    "floor3": {
+      "label": "3 层 · 室内展厅（官方出生点）",
+      "worldPosition": [0.0, 0.9555114450274363, -0.0],
+      "worldTarget": [0.0, 0.9555114450274363, 1.098612288668109],
+      "fov": 75.0
+    }
+  },
+  "contentUrl": "./sog/floor3/lod-meta.json",
+  "collisionUrl": "./sog/floor3/collision-manifest.json",
+  "posterUrl": "./sog/floor3/info/thumb.jpg"
+}

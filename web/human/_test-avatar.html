@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SplatAvatar 自检 / splat-avatar.js</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1b2027; }
+  canvas { display: block; }
+  #hud {
+    position: fixed; left: 10px; top: 10px; z-index: 10;
+    font: 12px/1.55 ui-monospace, Consolas, monospace; color: #b9c6d4;
+    background: rgba(12, 15, 20, .72); border: 1px solid #2a3542; border-radius: 6px;
+    padding: 8px 10px; white-space: pre; pointer-events: none; max-width: 46vw;
+  }
+  #hud b { color: #7fd1ff; font-weight: 600; }
+  #err {
+    position: fixed; left: 10px; bottom: 10px; right: 10px; z-index: 20;
+    font: 12px/1.5 ui-monospace, Consolas, monospace; color: #ffb4b4;
+    background: rgba(60, 12, 12, .9); border: 1px solid #7a2626; border-radius: 6px;
+    padding: 8px 10px; white-space: pre-wrap; display: none;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.js",
+    "three/addons/": "./vendor/three/addons/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud">booting…</div>
+<div id="err"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { SplatAvatar } from './splat-avatar.js';
+
+const Q = new URLSearchParams(location.search);
+const COUNT = +(Q.get('count') || 120000);
+const SIZE = +(Q.get('size') || 0.012);
+const OPACITY = Q.has('opacity') ? +Q.get('opacity') : 0.85;
+
+const hud = document.getElementById('hud');
+const errBox = document.getElementById('err');
+
+const test = {
+  ready: false,
+  stats: { splats: 0, buildMs: 0, count: 0, bones: 0, sortMs: 0, boneMs: 0 },
+  error: null,
+  bones: [],
+  setPose: (n) => setPose(n),
+  sample: () => null,
+};
+window.__test = test;
+
+function fail(msg, e) {
+  test.error = String(msg) + (e ? (': ' + (e.message || e)) : '');
+  errBox.style.display = 'block';
+  errBox.textContent = test.error;
+  console.error('[test] ' + test.error, e || '');
+}
+window.addEventListener('error', (e) => fail('window.error', e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => fail('unhandledrejection', e.reason));
+
+/* ---------------------------------------------------------------- 场景 */
+const renderer = new THREE.WebGLRenderer({
+  antialias: false,
+  alpha: false,
+  preserveDrawingBuffer: true,   // 供自检抓像素
+  powerPreference: 'high-performance',
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.setClearColor(0x1b2027, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b2027);
+
+const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.05, 60);
+camera.position.set(0.85, 1.02, -2.05);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.68, 0);
+controls.enableDamping = false;
+controls.update();
+
+const grid = new THREE.GridHelper(4, 20, 0x415063, 0x2b343f);
+grid.position.y = 0;
+scene.add(grid);
+
+/* 参考：坐标轴 1m */
+const axes = new THREE.AxesHelper(0.4);
+axes.position.set(-0.55, 0, -0.35);
+scene.add(axes);
+
+/* ---------------------------------------------------------------- 姿势 */
+const AX = new THREE.Vector3(1, 0, 0);
+const AY = new THREE.Vector3(0, 1, 0);
+const AZ = new THREE.Vector3(0, 0, 1);
+
+const boneAlias = new Map();
+/** GLTFLoader 会把节点名里的 ':' 去掉（mixamorig:RightArm → mixamorigRightArm），这里按后缀匹配 */
+function findBone(name) {
+  if (boneAlias.has(name)) return boneAlias.get(name);
+  const short = name.split(':').pop().toLowerCase();
+  let hit = null;
+  for (const [k, v] of boneMap) {
+    if (k === name || k.toLowerCase().endsWith(short)) { hit = v; break; }
+  }
+  boneAlias.set(name, hit);
+  return hit;
+}
+
+function rotBone(name, axis, ang) {
+  const b = findBone(name);
+  if (!b) return 0;
+  b.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(axis, ang));
+  return 1;
+}
+
+/** 'bind' | 'relaxed' | 'wave' | 'walk' */
+function setPose(name) {
+  for (const [b, q] of initQuats) b.quaternion.copy(q);
+  let applied = 0;
+  if (name === 'wave') {
+    applied += rotBone('mixamorig:RightArm', AZ, 1.45);
+    applied += rotBone('mixamorig:RightForeArm', AY, -0.9);
+    applied += rotBone('mixamorig:LeftArm', AZ, -0.9);
+  } else if (name === 'walk') {
+    applied += rotBone('mixamorig:LeftUpLeg', AX, 0.55);
+    applied += rotBone('mixamorig:RightUpLeg', AX, -0.45);
+    applied += rotBone('mixamorig:LeftLeg', AX, -0.35);
+    applied += rotBone('mixamorig:RightArm', AX, 0.5);
+    applied += rotBone('mixamorig:LeftArm', AX, -0.5);
+  } else if (name === 'relaxed') {
+    applied += rotBone('mixamorig:RightArm', AZ, -1.05);
+    applied += rotBone('mixamorig:LeftArm', AZ, 1.05);
+    applied += rotBone('mixamorig:RightForeArm', AY, 0.35);
+    applied += rotBone('mixamorig:LeftForeArm', AY, -0.35);
+  }
+  if (gltfRoot) gltfRoot.updateMatrixWorld(true);
+  if (avatar) { avatar.updateBones(); avatar.updateSort(camera); }
+  window.__poseName = name;
+  return { pose: name, applied };
+}
+
+/* ---------------------------------------------------------------- 加载 */
+let avatar = null;
+let mesh = null;
+let gltfRoot = null;
+const initQuats = new Map();
+const boneMap = new Map();
+
+async function boot() {
+  const gltf = await new GLTFLoader().loadAsync('./assets/astronaut.glb');
+  gltfRoot = gltf.scene;
+  gltf.scene.traverse((o) => {
+    if (o.isBone) { boneMap.set(o.name, o); initQuats.set(o, o.quaternion.clone()); }
+    if (o.isSkinnedMesh && !mesh) mesh = o;
+  });
+  if (!mesh) throw new Error('astronaut.glb 中没有 SkinnedMesh');
+  scene.add(gltf.scene);
+
+  scene.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(mesh);
+  const h = Math.max(0.2, box.max.y - box.min.y);
+  test.stats.height = +h.toFixed(3);
+  test.bones = [...boneMap.keys()];
+
+  /* 相机按身高取景 */
+  const fovRad = camera.fov * Math.PI / 180;
+  const dist = (h * 1.28 * 0.5) / Math.tan(fovRad * 0.5);
+  /* astronaut.glb 朝向 -Z（正面在 -Z 侧），测试相机放在 -Z 侧看正面 */
+  camera.position.set(dist * 0.30, h * 0.62, -dist * 0.95);
+  controls.target.set(0, h * 0.5, 0);
+  controls.update();
+
+  try {
+    avatar = await SplatAvatar.create({
+      mesh, count: COUNT, size: SIZE, opacity: OPACITY, renderer,
+    });
+    avatar.object.name = 'SplatAvatar';
+    scene.add(avatar.object);
+  } catch (e) {
+    fail('SplatAvatar.create 失败，回退原始网格', e);
+    if (typeof SplatAvatar.prototype.fallback === 'function' && avatar) avatar.fallback(e);
+    mesh.visible = true;
+    throw e;
+  }
+
+  // 首次骨骼刷新 + 排序，然后进入渲染循环
+  scene.updateMatrixWorld(true);
+  avatar.updateBones();
+  avatar.updateSort(camera);
+  renderer.render(scene, camera);
+
+  test.stats = {
+    splats: avatar.stats.splats,
+    count: avatar.stats.count,
+    buildMs: avatar.stats.buildMs,
+    bones: avatar.stats.bones,
+    height: avatar.stats.height,
+    sortMs: avatar.stats.sortMs,
+    boneMs: avatar.stats.boneMs,
+  };
+  test.ready = true;
+  window.__avatarRef = avatar;
+  window.__cam = camera;
+  window.__scene = scene;
+  hud.innerHTML = hudText();
+  requestAnimationFrame(tick);
+}
+
+/* ---------------------------------------------------------------- 循环 */
+let last = performance.now();
+let fps = 0;
+let frames = 0;
+let accMs = 0;
+let boneMs = 0, sortMs = 0, renderMs = 0, frameMs = 0;
+const sortRing = [];
+function median(a) { const b = a.slice().sort((x, y) => x - y); return b[b.length >> 1]; }
+
+function hudText() {
+  const s = test.stats;
+  return [
+    '<b>SplatAvatar</b>  ' + s.splats + ' splats / ' + s.bones + ' bones',
+    'build ' + s.buildMs + ' ms   身高 ' + s.height + ' m',
+    'updateBones ' + boneMs.toFixed(2) + ' ms   updateSort ' + sortMs.toFixed(2) + ' ms',
+    'render ' + renderMs.toFixed(2) + ' ms   frame ' + frameMs.toFixed(2) + ' ms   ' + fps.toFixed(1) + ' fps',
+    'pose: ' + (window.__poseName || 'bind'),
+  ].join('\n');
+}
+
+let hudTimer = 0;
+
+function tick(now) {
+  requestAnimationFrame(tick);
+
+  const t0 = performance.now();
+  scene.updateMatrixWorld(true);
+  avatar.updateBones();
+  const t1 = performance.now();
+  avatar.updateSort(camera);
+  const t2 = performance.now();
+  renderer.render(scene, camera);
+  const t3 = performance.now();
+
+  boneMs = t1 - t0; sortMs = t2 - t1; renderMs = t3 - t2;
+  sortRing.push(sortMs); if (sortRing.length > 31) sortRing.shift();
+  frameMs = t3 - t0;
+  accMs += (now - last); last = now; frames++;
+  if (accMs > 400) {
+    fps = frames * 1000 / accMs; accMs = 0; frames = 0;
+  }
+
+  if (now - hudTimer > 200) {
+    hudTimer = now;
+    test.stats.boneMs = +boneMs.toFixed(2);
+    test.stats.sortMs = +sortMs.toFixed(2);
+    test.stats.sortMsMedian = +median(sortRing).toFixed(2);
+    test.stats.renderMs = +renderMs.toFixed(2);
+    test.stats.frameMs = +frameMs.toFixed(2);
+    test.stats.fps = +fps.toFixed(1);
+    Object.assign(test.stats, { splats: avatar.stats.splats, bones: avatar.stats.bones, error: avatar.stats.error });
+    hud.innerHTML = hudText();
+  }
+}
+
+/* ---------------------------------------------------------------- 自检辅助 */
+/** 采样当前画面：非背景像素占比 + 包围盒（隐藏地网格后测量）。 */
+test.sample = function sample(threshold = 26) {
+  if (!avatar) return null;
+  const gv = grid.visible, av = axes.visible;
+  grid.visible = false; axes.visible = false;
+  renderer.render(scene, camera);
+  grid.visible = gv; axes.visible = av;
+
+  const src = renderer.domElement;
+  const W = 240, H = Math.max(1, Math.round(W * src.height / src.width));
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+
+  const bg = [0x1b, 0x20, 0x27];
+  let hit = 0;
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const diff = Math.abs(d[i] - bg[0]) + Math.abs(d[i + 1] - bg[1]) + Math.abs(d[i + 2] - bg[2]);
+      if (diff > threshold) {
+        hit++;
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return { coverage: 0, bbox: null, w: W, h: H };
+  return {
+    coverage: +(hit / (W * H)).toFixed(4),
+    bbox: [x0, y0, x1, y1],
+    bboxNorm: [+(x0 / W).toFixed(3), +(y0 / H).toFixed(3), +(x1 / W).toFixed(3), +(y1 / H).toFixed(3)],
+    w: W, h: H,
+  };
+};
+
+/** 排序隔离基准：连续跑 N 次 updateSort，返回中位数（ms），用于区分算法成本与渲染竞争 */
+test.benchSort = async function benchSort(times = 24) {
+  if (!avatar) return 0;
+  /* 先隐藏化身并等一帧，让软件光栅化（GPU 进程）空转，避免 CPU 竞争污染测量 */
+  avatar.setVisible(false);
+  await new Promise((r) => setTimeout(r, 700));
+  for (let i = 0; i < 16; i++) avatar.updateSort(camera);   // 预热（等 JIT）
+  const arr = [];
+  for (let i = 0; i < times; i++) {
+    const t = performance.now();
+    avatar.updateSort(camera);
+    arr.push(performance.now() - t);
+  }
+  arr.sort((a, b) => a - b);
+  avatar.setVisible(true);
+  test.stats.sortMsBench = +arr[arr.length >> 1].toFixed(2);
+  return test.stats.sortMsBench;
+};
+
+/** 换姿势（供 UI/自检） */
+window.setPose = setPose;
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+boot().catch((e) => fail('启动失败', e));
+</script>
+</body>
+</html>

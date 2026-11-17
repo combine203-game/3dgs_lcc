@@ -1,0 +1,1 @@
+Temporary Redirect. Redirecting to /api/resolve-cache/models/monoradio/motionbricks-soma-fp16-onnx/a0d70bb2a0d872ac5677cc55724b607bee52a11f/LICENSE-NVIDIA-Open-Model-Agreement.txt?%2Fmonoradio%2Fmotionbricks-soma-fp16-onnx%2Fresolve%2Fmain%2FLICENSE-NVIDIA-Open-Model-Agreement.txt=&etag=%22de01c5eaaa04091bcd7ba8d07fdbca4ef1b6dbdf%22

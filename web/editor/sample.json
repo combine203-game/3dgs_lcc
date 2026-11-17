@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "title": "茂名展示馆 · 场景标注示例",
+  "annotations": [
+    {
+      "id": "demo_gate", "kind": "point", "scene": "floor1", "floor": 1, "layerId": "spots", "groupId": "g_guide",
+      "points": [[0, 0.6, 4]], "title": "室外广场入口",
+      "body": "主入口与安检通道，参观动线起点。", "style": { "labelAlways": true }
+    },
+    {
+      "id": "demo_history", "kind": "point", "scene": "floor1", "floor": 1, "layerId": "spots", "groupId": "g_hall",
+      "points": [[-7.3, 1.0, 33.2]], "title": "历史人文厅",
+      "body": "展示茂名建市以来的城市变迁与人文脉络。"
+    },
+    {
+      "id": "demo_board", "kind": "board", "scene": "floor1", "floor": 1, "layerId": "spots", "groupId": "g_hall",
+      "points": [[10.5, 2.2, 34.9]], "title": "战略规划厅 · 展板",
+      "body": "面向 2035 的城市空间结构与产业布局规划说明。",
+      "link": "", "style": { "color": "#f59e0b", "labelAlways": true }
+    },
+    {
+      "id": "demo_screen", "kind": "screen", "scene": "floor1", "floor": 1, "layerId": "spots", "groupId": "g_hall",
+      "points": [[4.2, 1.9, 12]], "title": "序厅 · 三维实体屏",
+      "body": "固定在世界空间里的显示屏：尺寸与朝向由数据决定，不随视角改变；屏内可直接循环播放视频。",
+      "media": [{ "type": "video", "url": "", "caption": "演示片源" }],
+      "style": { "color": "#34d399", "labelAlways": true, "size": { "w": 2.6, "h": 1.5 }, "yaw": -22, "pitch": 0 }
+    },
+    {
+      "id": "demo_decal", "kind": "decal", "scene": "floor1", "floor": 1, "layerId": "zones", "groupId": "g_hall",
+      "points": [[1.5, -0.6, 15.5], [4.7, -0.6, 18.1]], "title": "序厅地面 · 视频投射区",
+      "body": "屏幕上框出的矩形，按当前画面深度反算重建投影机 OBB；贴花在 GPU 后处理阶段逐像素投射到真实表面（像素级贴合、不重构网格）。",
+      "media": [{ "type": "video", "url": "", "caption": "投射演示画面" }],
+      "rect": [0.30, 0.42, 0.72, 0.78], "surface": null, "projector": null,
+      "style": { "color": "#60a5fa", "labelAlways": true, "normal": [0, 1, 0], "decalOpacity": 0.9, "decalDepth": 0.5, "decalEdge": 0.12 }
+    },
+    {
+      "id": "demo_route", "kind": "line", "scene": "floor1", "floor": 1, "layerId": "routes", "groupId": "g_guide",
+      "points": [[0, 0.3, 2], [2, 0.3, 10], [-3, 0.6, 20], [-7.3, 1.0, 33.2]],
+      "title": "标准参观动线", "body": "入口 → 序厅 → 历史人文厅",
+      "style": { "color": "#f59e0b", "strokeWidth": 3, "bandWidth": 0.9, "flowSpeed": 1.4, "flowArrow": true }
+    },
+    {
+      "id": "demo_area", "kind": "area", "scene": "floor1", "floor": 1, "layerId": "zones", "groupId": "g_zone",
+      "points": [[-10, -0.6, 28], [-4, -0.6, 28], [-4, -0.6, 36], [-10, -0.6, 36]],
+      "title": "临时展区", "body": "可替换的专题展览区域，用于临展布展管理。",
+      "style": { "color": "#a78bfa" }
+    },
+    {
+      "id": "demo_measure", "kind": "measure", "scene": "floor1", "floor": 1, "layerId": "zones", "groupId": "g_zone",
+      "points": [[-5.8, 1.2, 31.7], [-4.2, 1.2, 31.7]], "title": "门洞净宽",
+      "body": "用于校核大型展品的通行尺寸。", "style": { "color": "#34d399" }
+    }
+  ],
+  "groups": [
+    { "id": "default", "name": "默认分组", "color": "#22d3ee", "visible": true, "collapsed": false, "order": 0 },
+    { "id": "g_guide", "name": "参观导览", "color": "#f59e0b", "visible": true, "collapsed": false, "order": 1 },
+    { "id": "g_hall", "name": "展厅内容", "color": "#a78bfa", "visible": true, "collapsed": false, "order": 2 },
+    { "id": "g_zone", "name": "空间量测", "color": "#34d399", "visible": true, "collapsed": false, "order": 3 }
+  ],
+  "layers": [
+    { "id": "spots", "name": "讲解点", "color": "#22d3ee", "visible": true },
+    { "id": "routes", "name": "动线", "color": "#f59e0b", "visible": true },
+    { "id": "zones", "name": "展区 / 测量", "color": "#a78bfa", "visible": true }
+  ],
+  "tours": [
+    {
+      "id": "tour_demo", "name": "标准参观导览",
+      "stops": [
+        { "title": "入口", "view": { "position": [0, 1.6, 8], "target": [0, 1.2, 2], "fov": 75 }, "dwell": 2600 },
+        { "title": "序厅", "view": { "position": [2, 1.6, 14], "target": [-1, 1.2, 20], "fov": 72 }, "dwell": 2600 },
+        { "title": "历史人文厅", "view": { "position": [-7.3, 1.8, 29], "target": [-7.3, 1.2, 33.2], "fov": 68 }, "dwell": 3200 }
+      ]
+    }
+  ],
+  "calibration": { "scale": 1, "unit": "m", "groundY": -0.644, "north": 0 },
+  "updatedAt": "2026-11-11T00:00:00.000Z"
+}

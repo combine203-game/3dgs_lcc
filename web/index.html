@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>茂名展示馆 · 线上展厅 / 标注编辑</title>
+<!-- 单入口：本页即站点默认页 index.html；楼层用 ?view= 无刷新切换。
+     标注编辑模块由 fusion.js 挂在左下角辅助条「标注编辑」：
+     点击 -> 隐藏 #stage 全部浏览态 HUD，postMessage 通知 3DGS iframe
+     内的 editor/bridge.js 动态挂载编辑器；/?edit=1 可直达编辑模式。 -->
+<link rel="icon" href="data:,">
+<meta name="description" content="茂名展示馆 3DGS 实景线上展厅 · 单页无刷新楼层导览">
+<!-- 共享资源：整次会话只加载 / 编译一次 -->
+<link rel="stylesheet" href="./maoming-showroom/showroom-base.css">
+<style id="view-css"></style>
+<link rel="stylesheet" href="./maoming-showroom/fusion.css">
+<!-- 预编译的 utility 样式（tools/extract_tailwind.mjs 生成，四页 class 并集）：
+     取代 410 KB 的 Tailwind Play CDN 运行时，首屏与切楼层都不再 JIT 编译 -->
+<link rel="stylesheet" href="./maoming-showroom/tailwind-static.css">
+<script src="./vendor/icons-local.js"></script>
+<script src="./maoming-showroom/showroom.js"></script>
+<script type="module" src="./maoming-showroom/fusion.js"></script>
+</head>
+<body data-view="outdoor" data-angle="132" data-distance="12" data-progress="34">
+<div id="viewport">
+  <!-- 3DGS Viewer iframe（floor1 / floor3 各一份，懒加载后常驻）由 fusion.js
+       注入到 #viewport 作为全屏背景层，铺满视口、不受 HUD 舞台缩放影响 -->
+  <div id="stage">
+    <div id="view-root"></div>
+    <!-- 三维功能控制台由 fusion.js 注入，跨楼层常驻 -->
+  </div>
+</div>
+</body>
+</html>

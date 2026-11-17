@@ -1,0 +1,109 @@
+# ============================================================
+# 3dgs_lcc · Git 忽略规则
+# 目标：仓库只跟踪「源码 + 文档 + 工具脚本」，二进制资产按需下载。
+# 单文件上限 100MB / 仓库建议 <1GB 是 GitHub 的硬约束。
+# ============================================================
+
+# ---------- 操作系统 / 编辑器 ----------
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# ---------- 敏感信息（零容忍） ----------
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+secrets.yml
+secrets.yaml
+secrets.json
+credentials
+credentials.json
+
+# ---------- 日志与临时文件 ----------
+*.log
+*.log.*
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+*.cache
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ---------- Node ----------
+node_modules/
+.npm/
+package-lock.json.bak
+
+# ============================================================
+# 以下为本项目专有：二进制资产与测试产物
+# ============================================================
+
+# ---- 1. 浏览器自动化产生的 Chrome 用户数据目录（含几十 GB 缓存）----
+.verify-profile/
+.verify-run.log
+.verify-last.log
+.shoot-last.log
+
+# ---- 2. 截图与测试产物（可由 tools/ 下的脚本重新生成）----
+shots/
+qa-report.json
+tools/*.png
+tools/*.log
+tools/*.report.json
+
+# ---- 3. 离线 Python 运行时（start.bat 可自动下载）----
+runtime/
+
+# ---- 4. 大二进制资产：ONNX 动作模型（231MB）----
+# 获取方式：node tools/fetch_hf_model.mjs q8h
+web/human/model/*.onnx
+web/human/model/weights.q8.*
+
+# ---- 5. 大二进制资产：SOG 高斯点云（约 120MB）----
+# SOG 是 ZIP 式容器，浏览器需按字节范围读取，故必须本地存在。
+web/sog/*.sog
+web/sog/floor1/data/
+web/sog/floor3/data/
+
+# ---- 6. 大二进制资产：测试视频（94MB）----
+web/media/*.mp4
+web/media/*.webm
+web/media/*.mov
+
+# ---- 7. 第三方 WASM 运行时（ONNX Runtime Web，约 53MB）----
+# 可用 npm i onnxruntime-web 重新安装；或从 CDN 引入。
+web/human/vendor/ort/*.wasm
+
+# ---- 8. 引擎 bundle 产物（由构建流程生成，体积 3.9MB）----
+# 如需保留请用 git-lfs 跟踪；此处默认不提交构建产物。
+# web/viewer/index.js

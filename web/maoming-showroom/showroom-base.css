@@ -1,0 +1,69 @@
+/* SPA 壳基础骨架：视图 CSS 注入前也保持正确布局，避免首帧闪动 */
+:root {
+  --accent: #63e2ff; --accent-rgb: 99, 226, 255;
+  --cool: #63e2ff; --jade: #66e5ff;
+  --ink: #e6faff; --muted: #86aab9;
+  --line: rgba(122, 219, 239, .17);
+  --panel: rgba(4, 20, 32, .82);
+  /* 由 showroom.js::fitStage() 按视口计算，<html> 与 #stage 各写一份 */
+  --ui-zoom: 1;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; width: 100%; height: 100%; overflow: hidden;
+  background: #020b12; color: var(--ink);
+  font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+body {
+  background: radial-gradient(circle at 50% 40%, rgba(24, 83, 108, .34), transparent 54%),
+              linear-gradient(180deg, #020b12 0%, #04121d 55%, #02090f 100%);
+}
+button, a { font-family: inherit; }
+button { border: 0; padding: 0; background: none; color: inherit; cursor: pointer; }
+a { color: inherit; text-decoration: none; }
+#viewport {
+  position: fixed; inset: 0; overflow: hidden; isolation: isolate;
+  background: radial-gradient(ellipse at 54% 45%, rgba(18, 76, 100, .22), transparent 62%), #020b12;
+}
+/* 三维实景是 #viewport 的直接子项：按视口 100% 铺满，不参与 16:9 舞台缩放，
+   任意窗口宽高比下都左右/上下无黑边（PlayCanvas 会按新宽高比重算投影）。 */
+#viewport > .gs-scene-frame {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  border: 0; margin: 0; padding: 0; background: #03131f; z-index: 0;
+}
+/* HUD 舞台：整套固定 px 的设计稿 HUD 由 zoom 等比缩放到当前视口。
+   zoom = min(vw/1920, vh/1080)（fitStage 计算），逻辑画布 = 视口 / zoom，
+   恒 >= 1920x1080，因此：
+     · 4K / 16:10 大屏：HUD 同步放大，不再小得看不清；
+     · 1366x768 小屏：HUD 同步缩小，标题与右侧信息、左侧上下两块面板
+       都不会互相挤压（改造前分别重叠 243px 与 2.7 万 px²）；
+     · 超宽 / 超矮：多出来的逻辑空间留给中部三维场景，面板各自贴边。
+   三维 iframe 在 #viewport 下，不参与 zoom，始终 100% 铺满、无黑边。 */
+#stage {
+  position: absolute; inset: 0; z-index: 1;
+  zoom: var(--ui-zoom, 1);
+  /* zoom 缩放的是「子元素坐标系」，舞台自身仍按视口 100% 铺满；
+     子元素的 100% 会自动解析成 视口/zoom 的逻辑宽度，再渲染回视口宽。
+     若再把 width 除以 zoom，舞台反而只占视口的 1/zoom（曾导致 HUD 挤在左上）。 */
+  width: 100%; height: 100%;
+  overflow: hidden; transform: none;
+  background: transparent; box-shadow: none;
+  /* 透明 HUD 层默认不吃鼠标：拖拽 / 滚轮直接落到下层三维 iframe */
+  pointer-events: none;
+}
+/* pointer-events 是继承属性，所有装饰层（顶部渐变、scene-overlay、扫描线、
+   角落标记、纯文字说明）自动透传；这里只给真正要操作的实体 UI 恢复 auto。 */
+#stage button, #stage a, #stage input, #stage select, #stage textarea,
+#stage canvas, #stage [onclick],
+#stage .hud-panel, #stage .floor-panel, #stage .mini-map,
+#stage #mg-minimap, #stage #gs-console, #stage .gs-quick,
+#stage .overlay-blur, #stage #systemClosed,
+#stage .tool-btn, #stage .nav-step, #stage .chip, #stage .speed-chip {
+  pointer-events: auto;
+}
+/* 视图注入点：不生成盒子，子元素仍是 #stage 的直接布局子项 */
+#view-root { display: contents; }
+/* 极端缩放（逻辑画布被压到设计稿以下）时收起次要场景说明，保证主导航可用 */
+@media (max-height: 520px), (max-width: 900px) {
+  #stage .scene-caption { display: none; }
+}

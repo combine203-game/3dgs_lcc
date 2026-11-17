@@ -1,0 +1,1002 @@
+{
+  "wait": 8000,
+  "loops": 1,
+  "steps": [
+    {
+      "label": "browse-default",
+      "note": "默认首页 outdoor.html / spawn=outdoor",
+      "probe": {
+        "isFusion": false,
+        "viewer": false,
+        "autoRender": null,
+        "renderNextFrame": null,
+        "gsplats": null,
+        "ctxLost": null,
+        "clearColor": null,
+        "framebuffer": null,
+        "canvas": false,
+        "canvasSize": null,
+        "canvasRect": null,
+        "canvasAbs": null,
+        "cam": null,
+        "fov": 0,
+        "near": null,
+        "far": 0,
+        "renderer": null,
+        "rendererReason": null,
+        "loading": null,
+        "loadingReason": null,
+        "mgLoading": null,
+        "error": null,
+        "errorText": "",
+        "posterVisible": false,
+        "bridgeStage": null,
+        "mounted": false,
+        "ed": false,
+        "pose": null,
+        "host": null,
+        "attr": "",
+        "frames": []
+      },
+      "shot": {
+        "w": 1258,
+        "h": 702,
+        "clip": {
+          "x0": 0,
+          "y0": 0,
+          "x1": 1258,
+          "y1": 702
+        },
+        "n": 98280,
+        "mean": 12.51,
+        "sd": 3.08,
+        "brightRatio": 0,
+        "nearBlackRatio": 0.5174,
+        "black": true,
+        "diff": {
+          "meanDiff": 17.678,
+          "changedRatio": 0.1106
+        }
+      }
+    },
+    {
+      "label": "editor-enter",
+      "note": "点击标注编辑",
+      "probe": {
+        "isFusion": true,
+        "viewer": true,
+        "autoRender": true,
+        "renderNextFrame": true,
+        "gsplats": 0,
+        "ctxLost": false,
+        "clearColor": [
+          0.039,
+          0.051,
+          0.07,
+          1
+        ],
+        "framebuffer": "default",
+        "canvas": true,
+        "canvasSize": [
+          1258,
+          702
+        ],
+        "canvasRect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "canvasAbs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "cam": [
+          0,
+          0,
+          0
+        ],
+        "fov": 45,
+        "near": 0.1,
+        "far": 1000,
+        "renderer": "webgl",
+        "rendererReason": "无可用 GPU 适配器",
+        "loading": {
+          "hidden": false,
+          "display": "flex",
+          "opacity": "1",
+          "visibility": "visible",
+          "cls": ""
+        },
+        "loadingReason": null,
+        "mgLoading": null,
+        "error": {
+          "hidden": true,
+          "display": "none",
+          "opacity": "1",
+          "visibility": "visible",
+          "cls": ""
+        },
+        "errorText": "",
+        "posterVisible": false,
+        "bridgeStage": "mounted",
+        "mounted": true,
+        "ed": true,
+        "pose": {
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "target": [
+            0,
+            0,
+            -1
+          ],
+          "fov": 45
+        },
+        "host": {
+          "on": true,
+          "page": "outdoor.html",
+          "scene": "floor1"
+        },
+        "attr": "on",
+        "frames": [
+          {
+            "scene": "floor1",
+            "active": "1",
+            "src": "./gs-viewer.html?embed=showroom&scene=floor1&spawn=outdoor"
+          }
+        ]
+      },
+      "shot": {
+        "w": 1258,
+        "h": 702,
+        "clip": {
+          "x0": 0,
+          "y0": 0,
+          "x1": 1258,
+          "y1": 702
+        },
+        "n": 98280,
+        "mean": 67.22,
+        "sd": 51.08,
+        "brightRatio": 0.5122,
+        "nearBlackRatio": 0.0004,
+        "black": false,
+        "diff": {
+          "meanDiff": 60.266,
+          "changedRatio": 0.4348
+        }
+      }
+    },
+    {
+      "label": "editor-exit",
+      "note": "点击退出编辑",
+      "probe": {
+        "isFusion": true,
+        "viewer": true,
+        "autoRender": false,
+        "renderNextFrame": false,
+        "gsplats": 7462017,
+        "ctxLost": false,
+        "clearColor": [
+          0.039,
+          0.051,
+          0.07,
+          1
+        ],
+        "framebuffer": "default",
+        "canvas": true,
+        "canvasSize": [
+          1258,
+          702
+        ],
+        "canvasRect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "canvasAbs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "cam": [
+          0,
+          1.6264,
+          0
+        ],
+        "fov": 90,
+        "near": 0.01,
+        "far": 418.34,
+        "renderer": "webgl",
+        "rendererReason": "无可用 GPU 适配器",
+        "loading": {
+          "hidden": false,
+          "display": "flex",
+          "opacity": "0",
+          "visibility": "visible",
+          "cls": "mg-hide"
+        },
+        "loadingReason": "firstFrame",
+        "mgLoading": {
+          "revealed": true,
+          "reason": "firstFrame",
+          "atMs": 12989,
+          "gsplats": 7462017,
+          "gsplatsConfirmedAtMs": 16730
+        },
+        "error": {
+          "hidden": true,
+          "display": "none",
+          "opacity": "1",
+          "visibility": "visible",
+          "cls": ""
+        },
+        "errorText": "",
+        "posterVisible": false,
+        "bridgeStage": "unmounted",
+        "mounted": false,
+        "ed": false,
+        "pose": {
+          "position": [
+            0,
+            1.6264445781707764,
+            0
+          ],
+          "target": [
+            -1.2246468525851679e-16,
+            1.6264445781707764,
+            1
+          ],
+          "fov": 90
+        },
+        "host": {
+          "on": false,
+          "page": "outdoor.html",
+          "scene": "floor1"
+        },
+        "attr": "off",
+        "frames": [
+          {
+            "scene": "floor1",
+            "active": "1",
+            "src": "./gs-viewer.html?embed=showroom&scene=floor1&spawn=outdoor"
+          }
+        ]
+      },
+      "shot": {
+        "w": 1258,
+        "h": 702,
+        "clip": {
+          "x0": 0,
+          "y0": 0,
+          "x1": 1258,
+          "y1": 702
+        },
+        "n": 98280,
+        "mean": 71.07,
+        "sd": 47.76,
+        "brightRatio": 0.6456,
+        "nearBlackRatio": 0.0505,
+        "black": false,
+        "diff": {
+          "meanDiff": 0.254,
+          "changedRatio": 0.0008
+        }
+      }
+    },
+    {
+      "label": "editor-loops",
+      "note": "反复进出 1 次后",
+      "probe": {
+        "isFusion": true,
+        "viewer": true,
+        "autoRender": false,
+        "renderNextFrame": false,
+        "gsplats": 7462017,
+        "ctxLost": false,
+        "clearColor": [
+          0.039,
+          0.051,
+          0.07,
+          1
+        ],
+        "framebuffer": "default",
+        "canvas": true,
+        "canvasSize": [
+          1258,
+          702
+        ],
+        "canvasRect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "canvasAbs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "cam": [
+          0,
+          1.6264,
+          0
+        ],
+        "fov": 90,
+        "near": 0.01,
+        "far": 418.34,
+        "renderer": "webgl",
+        "rendererReason": "无可用 GPU 适配器",
+        "loading": {
+          "hidden": false,
+          "display": "flex",
+          "opacity": "0",
+          "visibility": "visible",
+          "cls": "mg-hide"
+        },
+        "loadingReason": "firstFrame",
+        "mgLoading": {
+          "revealed": true,
+          "reason": "firstFrame",
+          "atMs": 12989,
+          "gsplats": 7462017,
+          "gsplatsConfirmedAtMs": 16730
+        },
+        "error": {
+          "hidden": true,
+          "display": "none",
+          "opacity": "1",
+          "visibility": "visible",
+          "cls": ""
+        },
+        "errorText": "",
+        "posterVisible": false,
+        "bridgeStage": "unmounted",
+        "mounted": false,
+        "ed": false,
+        "pose": {
+          "position": [
+            0,
+            1.6264445781707764,
+            0
+          ],
+          "target": [
+            -1.2246468525851679e-16,
+            1.6264445781707764,
+            1
+          ],
+          "fov": 90
+        },
+        "host": {
+          "on": false,
+          "page": "outdoor.html",
+          "scene": "floor1"
+        },
+        "attr": "off",
+        "frames": [
+          {
+            "scene": "floor1",
+            "active": "1",
+            "src": "./gs-viewer.html?embed=showroom&scene=floor1&spawn=outdoor"
+          }
+        ]
+      },
+      "shot": {
+        "w": 1258,
+        "h": 702,
+        "clip": {
+          "x0": 0,
+          "y0": 0,
+          "x1": 1258,
+          "y1": 702
+        },
+        "n": 98280,
+        "mean": 71.08,
+        "sd": 47.77,
+        "brightRatio": 0.6456,
+        "nearBlackRatio": 0.0505,
+        "black": false,
+        "diff": {
+          "meanDiff": 0.052,
+          "changedRatio": 0.0005
+        }
+      }
+    },
+    {
+      "label": "switch-same-scene",
+      "note": "同场景切一层（复用已解码 SOG）",
+      "probe": {
+        "isFusion": true,
+        "viewer": true,
+        "autoRender": true,
+        "renderNextFrame": false,
+        "gsplats": 7462017,
+        "ctxLost": false,
+        "clearColor": [
+          0.039,
+          0.051,
+          0.07,
+          1
+        ],
+        "framebuffer": "default",
+        "canvas": true,
+        "canvasSize": [
+          1258,
+          702
+        ],
+        "canvasRect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "canvasAbs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "cam": [
+          18.5025,
+          2.4689,
+          17.0752
+        ],
+        "fov": 90,
+        "near": 0.01,
+        "far": 430.25,
+        "renderer": "webgl",
+        "rendererReason": "无可用 GPU 适配器",
+        "loading": {
+          "hidden": false,
+          "display": "flex",
+          "opacity": "0",
+          "visibility": "visible",
+          "cls": "mg-hide"
+        },
+        "loadingReason": "firstFrame",
+        "mgLoading": {
+          "revealed": true,
+          "reason": "firstFrame",
+          "atMs": 12989,
+          "gsplats": 7462017,
+          "gsplatsConfirmedAtMs": 16730
+        },
+        "error": {
+          "hidden": true,
+          "display": "none",
+          "opacity": "1",
+          "visibility": "visible",
+          "cls": ""
+        },
+        "errorText": "",
+        "posterVisible": false,
+        "bridgeStage": "unmounted",
+        "mounted": false,
+        "ed": false,
+        "pose": {
+          "position": [
+            18.502470016479492,
+            2.468864679336548,
+            17.075218200683594
+          ],
+          "target": [
+            17.583208156446744,
+            2.466573679851443,
+            17.468858117372047
+          ],
+          "fov": 90
+        },
+        "host": {
+          "on": false,
+          "page": "floor-1.html",
+          "scene": "floor1"
+        },
+        "attr": "off",
+        "frames": [
+          {
+            "scene": "floor1",
+            "active": "1",
+            "src": "./gs-viewer.html?embed=showroom&scene=floor1&spawn=outdoor"
+          }
+        ]
+      },
+      "shot": {
+        "w": 1258,
+        "h": 702,
+        "clip": {
+          "x0": 0,
+          "y0": 0,
+          "x1": 1258,
+          "y1": 702
+        },
+        "n": 98280,
+        "mean": 72.79,
+        "sd": 39.73,
+        "brightRatio": 0.7545,
+        "nearBlackRatio": 0.0033,
+        "black": false,
+        "diff": {
+          "meanDiff": 1.874,
+          "changedRatio": 0.0084
+        }
+      }
+    },
+    {
+      "label": "switch-cross-scene",
+      "note": "跨场景新建三层 iframe（首帧门控 + 后台暂停）",
+      "probe": {
+        "isFusion": true,
+        "viewer": true,
+        "autoRender": false,
+        "renderNextFrame": false,
+        "gsplats": 2003571,
+        "ctxLost": false,
+        "clearColor": [
+          0.039,
+          0.051,
+          0.07,
+          1
+        ],
+        "framebuffer": "default",
+        "canvas": true,
+        "canvasSize": [
+          1258,
+          702
+        ],
+        "canvasRect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "canvasAbs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "cam": [
+          0,
+          1.6241,
+          0
+        ],
+        "fov": 90,
+        "near": 0.01,
+        "far": 82.67,
+        "renderer": "webgl",
+        "rendererReason": "无可用 GPU 适配器",
+        "loading": {
+          "hidden": false,
+          "display": "flex",
+          "opacity": "0",
+          "visibility": "visible",
+          "cls": "mg-hide"
+        },
+        "loadingReason": "firstFrame",
+        "mgLoading": {
+          "revealed": true,
+          "reason": "firstFrame",
+          "atMs": 4697,
+          "gsplats": 2003571,
+          "gsplatsConfirmedAtMs": 5270
+        },
+        "error": {
+          "hidden": true,
+          "display": "none",
+          "opacity": "1",
+          "visibility": "visible",
+          "cls": ""
+        },
+        "errorText": "",
+        "posterVisible": false,
+        "bridgeStage": "idle",
+        "mounted": false,
+        "ed": false,
+        "pose": {
+          "position": [
+            0,
+            1.624070167541504,
+            0
+          ],
+          "target": [
+            -1.2246468525851679e-16,
+            1.624070167541504,
+            1
+          ],
+          "fov": 90
+        },
+        "host": {
+          "on": false,
+          "page": "floor-3.html",
+          "scene": "floor3"
+        },
+        "attr": "off",
+        "frames": [
+          {
+            "scene": "floor3",
+            "active": "1",
+            "src": "./gs-viewer.html?embed=showroom&scene=floor3&spawn=floor3"
+          },
+          {
+            "scene": "floor1",
+            "active": "0",
+            "src": "./gs-viewer.html?embed=showroom&scene=floor1&spawn=outdoor"
+          }
+        ]
+      },
+      "shot": {
+        "w": 1258,
+        "h": 702,
+        "clip": {
+          "x0": 0,
+          "y0": 0,
+          "x1": 1258,
+          "y1": 702
+        },
+        "n": 98280,
+        "mean": 87.42,
+        "sd": 49.53,
+        "brightRatio": 0.7725,
+        "nearBlackRatio": 0.014,
+        "black": false,
+        "diff": {
+          "meanDiff": 0.058,
+          "changedRatio": 0.0004
+        }
+      }
+    },
+    {
+      "label": "ab-metric-spawn",
+      "note": "spawn=floor1 米制机位 [18.5,1.89,17.07]",
+      "probe": {
+        "isFusion": false,
+        "viewer": true,
+        "autoRender": false,
+        "renderNextFrame": false,
+        "gsplats": 7462017,
+        "ctxLost": false,
+        "clearColor": [
+          0.039,
+          0.051,
+          0.07,
+          1
+        ],
+        "framebuffer": "default",
+        "canvas": true,
+        "canvasSize": [
+          1258,
+          702
+        ],
+        "canvasRect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "canvasAbs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "cam": [
+          18.5025,
+          1.957,
+          17.0752
+        ],
+        "fov": 76.65,
+        "near": 0.01,
+        "far": 430.53,
+        "renderer": "webgl",
+        "rendererReason": "无可用 GPU 适配器",
+        "loading": {
+          "hidden": false,
+          "display": "flex",
+          "opacity": "0.980837",
+          "visibility": "visible",
+          "cls": "mg-hide"
+        },
+        "loadingReason": "firstFrame",
+        "mgLoading": {
+          "revealed": true,
+          "reason": "firstFrame",
+          "atMs": 6329,
+          "gsplats": 0
+        },
+        "error": {
+          "hidden": true,
+          "display": "none",
+          "opacity": "1",
+          "visibility": "visible",
+          "cls": ""
+        },
+        "errorText": "",
+        "posterVisible": false,
+        "bridgeStage": "idle",
+        "mounted": false,
+        "ed": false,
+        "pose": {
+          "position": [
+            18.502470016479492,
+            1.9569615125656128,
+            17.075218200683594
+          ],
+          "target": [
+            17.583208156446744,
+            1.954670513080508,
+            17.468858117372047
+          ],
+          "fov": 76.65047579398014
+        },
+        "host": null,
+        "attr": "",
+        "frames": []
+      },
+      "shot": {
+        "w": 1258,
+        "h": 702,
+        "clip": {
+          "x0": 0,
+          "y0": 0,
+          "x1": 1258,
+          "y1": 702
+        },
+        "n": 98280,
+        "mean": 98.89,
+        "sd": 39.8,
+        "brightRatio": 0.9423,
+        "nearBlackRatio": 0.0016,
+        "black": false,
+        "diff": {
+          "meanDiff": 28.76,
+          "changedRatio": 0.3863
+        }
+      }
+    },
+    {
+      "label": "ab-log-spawn",
+      "note": "spawn=outdoor log 空间机位 [0,0.9555,0]",
+      "probe": {
+        "isFusion": false,
+        "viewer": true,
+        "autoRender": false,
+        "renderNextFrame": false,
+        "gsplats": 7462017,
+        "ctxLost": false,
+        "clearColor": [
+          0.039,
+          0.051,
+          0.07,
+          1
+        ],
+        "framebuffer": "default",
+        "canvas": true,
+        "canvasSize": [
+          1258,
+          702
+        ],
+        "canvasRect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "canvasAbs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "cam": [
+          0,
+          0.9555,
+          0
+        ],
+        "fov": 75,
+        "near": 0.01,
+        "far": 418.79,
+        "renderer": "webgl",
+        "rendererReason": "无可用 GPU 适配器",
+        "loading": {
+          "hidden": false,
+          "display": "flex",
+          "opacity": "1",
+          "visibility": "visible",
+          "cls": "mg-hide"
+        },
+        "loadingReason": "firstFrame",
+        "mgLoading": {
+          "revealed": true,
+          "reason": "firstFrame",
+          "atMs": 6212,
+          "gsplats": 7462017,
+          "gsplatsConfirmedAtMs": 6474
+        },
+        "error": {
+          "hidden": true,
+          "display": "none",
+          "opacity": "1",
+          "visibility": "visible",
+          "cls": ""
+        },
+        "errorText": "",
+        "posterVisible": false,
+        "bridgeStage": "idle",
+        "mounted": false,
+        "ed": false,
+        "pose": {
+          "position": [
+            0,
+            0.9555114507675171,
+            0
+          ],
+          "target": [
+            -1.2246468525851679e-16,
+            0.9555114507675171,
+            1
+          ],
+          "fov": 75
+        },
+        "host": null,
+        "attr": "",
+        "frames": []
+      },
+      "shot": {
+        "w": 1258,
+        "h": 702,
+        "clip": {
+          "x0": 0,
+          "y0": 0,
+          "x1": 1258,
+          "y1": 702
+        },
+        "n": 98280,
+        "mean": 92.9,
+        "sd": 45.95,
+        "brightRatio": 0.8299,
+        "nearBlackRatio": 0.0117,
+        "black": false,
+        "diff": {
+          "meanDiff": 52.893,
+          "changedRatio": 0.5533
+        }
+      }
+    },
+    {
+      "label": "ab-pos-override",
+      "note": "?pos/?look 强制米制可见机位",
+      "probe": {
+        "isFusion": false,
+        "viewer": true,
+        "autoRender": false,
+        "renderNextFrame": false,
+        "gsplats": 7462017,
+        "ctxLost": false,
+        "clearColor": [
+          0.039,
+          0.051,
+          0.07,
+          1
+        ],
+        "framebuffer": "default",
+        "canvas": true,
+        "canvasSize": [
+          1258,
+          702
+        ],
+        "canvasRect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "canvasAbs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "cam": [
+          18.5025,
+          1.9566,
+          17.0752
+        ],
+        "fov": 76.64,
+        "near": 0.01,
+        "far": 430.53,
+        "renderer": "webgl",
+        "rendererReason": "无可用 GPU 适配器",
+        "loading": {
+          "hidden": false,
+          "display": "flex",
+          "opacity": "0.981085",
+          "visibility": "visible",
+          "cls": "mg-hide"
+        },
+        "loadingReason": "firstFrame",
+        "mgLoading": {
+          "revealed": true,
+          "reason": "firstFrame",
+          "atMs": 6170,
+          "gsplats": 0
+        },
+        "error": {
+          "hidden": true,
+          "display": "none",
+          "opacity": "1",
+          "visibility": "visible",
+          "cls": ""
+        },
+        "errorText": "",
+        "posterVisible": false,
+        "bridgeStage": "idle",
+        "mounted": false,
+        "ed": false,
+        "pose": {
+          "position": [
+            18.502470016479492,
+            1.9566088914871216,
+            17.075218200683594
+          ],
+          "target": [
+            17.583208156446744,
+            1.9543178920020168,
+            17.468858117372047
+          ],
+          "fov": 76.64120923429263
+        },
+        "host": null,
+        "attr": "",
+        "frames": []
+      },
+      "shot": {
+        "w": 1258,
+        "h": 702,
+        "clip": {
+          "x0": 0,
+          "y0": 0,
+          "x1": 1258,
+          "y1": 702
+        },
+        "n": 98280,
+        "mean": 99.03,
+        "sd": 40,
+        "brightRatio": 0.9416,
+        "nearBlackRatio": 0.0017,
+        "black": false,
+        "diff": {
+          "meanDiff": 18.517,
+          "changedRatio": 0.2485
+        }
+      }
+    }
+  ],
+  "errors": [],
+  "requests": {
+    "total": 328,
+    "sog": [
+      "http://127.0.0.1:18131/sog/mm_floor1_clean.sog",
+      "http://127.0.0.1:18131/sog/mm_floor3_clean.sog"
+    ],
+    "wasm": [],
+    "lodMeta": []
+  },
+  "glAnomalies": [],
+  "firstFrameGate": {
+    "skipped": true,
+    "pass": null,
+    "reason": null,
+    "atMs": null,
+    "gsplatsAtReveal": null,
+    "firstRenderedAtMs": null,
+    "blackWindows": []
+  }
+}

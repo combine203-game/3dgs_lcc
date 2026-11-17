@@ -1,0 +1,334 @@
+{
+  "gpuAdapter": "adapter-ok",
+  "baseMean": 92.45,
+  "editorMean": 92.45,
+  "worst": 93.17,
+  "blank": false,
+  "collapse": false,
+  "drift": 0.009410492157923098,
+  "decalDebug": {
+    "enabled": true,
+    "degraded": false,
+    "gpuErrors": 0,
+    "pickReady": true,
+    "pickSize": [
+      1258,
+      650
+    ],
+    "pickTextureFormat": 12,
+    "instances": [
+      {
+        "id": "diag-decal-1794577346334",
+        "visible": true,
+        "hasProjector": true,
+        "videoUrl": null,
+        "demoMode": true,
+        "videoReady": false,
+        "videoErr": null,
+        "texW": 1024,
+        "texH": 576
+      }
+    ]
+  },
+  "pageGpuErr": 0,
+  "gpuErrTotal": 0,
+  "pickReadyOk": true,
+  "visAvg": 93.245,
+  "hiddenMean": 92.46,
+  "projDelta": 0.7850000000000108,
+  "projOk": true,
+  "demoOk": true,
+  "rebuild": {
+    "rebuilt": true,
+    "source": null,
+    "stats": null,
+    "rect": [
+      0.33,
+      0.45,
+      0.75,
+      0.81
+    ],
+    "half": [
+      4,
+      3,
+      1.2
+    ],
+    "pos": [
+      0,
+      1.22,
+      7.7
+    ],
+    "status": "正在按当前视角重新投射投影机…"
+  },
+  "guardOk": true,
+  "shaderErrors": [],
+  "errors": [],
+  "warns": [],
+  "fail": false,
+  "rows": [
+    {
+      "label": "browse-0",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "backend": "webgpu",
+        "gpuApi": true,
+        "decals": null,
+        "decalMgr": null,
+        "editorOn": false,
+        "tool": null,
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 91140,
+        "mean": 92.45,
+        "sd": 46.26,
+        "nearBlack": 0.0123,
+        "blank": false
+      }
+    },
+    {
+      "label": "browse-1",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "backend": "webgpu",
+        "gpuApi": true,
+        "decals": null,
+        "decalMgr": null,
+        "editorOn": false,
+        "tool": null,
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 91140,
+        "mean": 92.45,
+        "sd": 46.26,
+        "nearBlack": 0.0123,
+        "blank": false
+      }
+    },
+    {
+      "label": "editor",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "backend": "webgpu",
+        "gpuApi": true,
+        "decals": 1,
+        "decalMgr": true,
+        "editorOn": true,
+        "tool": "select",
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 91140,
+        "mean": 92.45,
+        "sd": 46.26,
+        "nearBlack": 0.0123,
+        "blank": false
+      }
+    },
+    {
+      "label": "decal-0",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "backend": "webgpu",
+        "gpuApi": true,
+        "decals": 2,
+        "decalMgr": true,
+        "editorOn": true,
+        "tool": "decal",
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 91140,
+        "mean": 93.31,
+        "sd": 47.8,
+        "nearBlack": 0.0123,
+        "blank": false
+      }
+    },
+    {
+      "label": "decal-1500",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "backend": "webgpu",
+        "gpuApi": true,
+        "decals": 2,
+        "decalMgr": true,
+        "editorOn": true,
+        "tool": "decal",
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 91140,
+        "mean": 93.17,
+        "sd": 47.59,
+        "nearBlack": 0.0123,
+        "blank": false
+      }
+    },
+    {
+      "label": "decal-3500",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "backend": "webgpu",
+        "gpuApi": true,
+        "decals": 2,
+        "decalMgr": true,
+        "editorOn": true,
+        "tool": "decal",
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 91140,
+        "mean": 93.18,
+        "sd": 47.59,
+        "nearBlack": 0.0123,
+        "blank": false
+      }
+    },
+    {
+      "label": "decal-6000",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "backend": "webgpu",
+        "gpuApi": true,
+        "decals": 2,
+        "decalMgr": true,
+        "editorOn": true,
+        "tool": "decal",
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 91140,
+        "mean": 93.32,
+        "sd": 47.82,
+        "nearBlack": 0.0123,
+        "blank": false
+      }
+    },
+    {
+      "label": "decals-hidden",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "backend": "webgpu",
+        "gpuApi": true,
+        "decals": 2,
+        "decalMgr": true,
+        "editorOn": true,
+        "tool": "decal",
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 91140,
+        "mean": 92.46,
+        "sd": 46.26,
+        "nearBlack": 0.0123,
+        "blank": false
+      }
+    }
+  ]
+}

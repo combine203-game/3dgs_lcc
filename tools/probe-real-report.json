@@ -1,0 +1,109 @@
+{
+  "decalId": "real-decal-1794834074168",
+  "selRect": [
+    0.34,
+    0.52,
+    0.56,
+    0.72
+  ],
+  "projector": {
+    "position": [
+      1.4875261914343854,
+      1.09947306242548,
+      6.423818470274688
+    ],
+    "quaternion": [
+      -0.013811553103612694,
+      0.9714473632522427,
+      0.17587787641991612,
+      0.15863869016463814
+    ],
+    "half": [
+      2.0848167966231466,
+      1.077082081268534,
+      1.994002611286926
+    ],
+    "depth": 3.988005222573852
+  },
+  "surface": {
+    "source": "depth",
+    "samples": 49,
+    "stats": {
+      "depth": 49
+    },
+    "pts": [
+      [
+        2.8343512902083057,
+        1.4449292481531322,
+        8.838149589664324
+      ],
+      [
+        1.0561068460101504,
+        1.5389937877311837,
+        4.258061360028187
+      ],
+      [
+        0.8320167582099189,
+        1.5281125601872456,
+        4.787878254062537
+      ],
+      [
+        0.5466857315400655,
+        1.5153959097370966,
+        5.407063563513469
+      ]
+    ]
+  },
+  "cover": {
+    "sel": {
+      "x": 646,
+      "y": 510,
+      "w": 418,
+      "h": 196
+    },
+    "obbAll": {
+      "x": 150,
+      "y": 222,
+      "w": 942,
+      "h": 555
+    },
+    "obbFront": {
+      "x": 150,
+      "y": 222,
+      "w": 794,
+      "h": 474
+    }
+  },
+  "area": 81928,
+  "changed": 78998,
+  "changedAll": 131041,
+  "noiseOnly": 0,
+  "coverage": 0.9642368909286203,
+  "bboxRatio": 1,
+  "hueVisible": 205,
+  "hueDelta": 5,
+  "isoRate": 0,
+  "outsideRatio": 0.3971505101456796,
+  "spillRatio": 0,
+  "legacyCoverage": 0.3481836346437947,
+  "thresholds": {
+    "coverage": 0.8,
+    "fill": 0.7,
+    "hue": 15,
+    "isolated": 0.02,
+    "spill": 0.01
+  },
+  "pass": true,
+  "errors": [
+    "[decal-projection] GPU 错误（待归因，下一帧复测）: Vertex attribute slot 0 used in ([ShaderModule (unlabeled)], [EntryPoint \"vertexMain\"]) is not present in the VertexState.\n - While validating vertex state.\n - While calling [Device].CreateRenderPipel",
+    "[decal-projection] GPU 错误（待归因，下一帧复测）: [Invalid RenderPipeline (unlabeled)] is invalid.\n - While encoding [RenderPassEncoder \"RenderPassForward-PassEncoder RT:WebgpuFramebuffer\"].SetPipeline([Invalid RenderPipeline (unlabeled)]).\n - While ",
+    "[decal-projection] GPU 错误（待归因，下一帧复测）: [Invalid RenderPipeline (unlabeled)] is invalid.\n - While encoding [RenderPassEncoder \"RenderPassForward-PassEncoder RT:WebgpuFramebuffer\"].SetPipeline([Invalid RenderPipeline (unlabeled)]).\n - While ",
+    "[decal-projection] GPU 错误（待归因，下一帧复测）: [Invalid RenderPipeline (unlabeled)] is invalid.\n - While encoding [RenderPassEncoder \"RenderPassForward-PassEncoder RT:WebgpuFramebuffer\"].SetPipeline([Invalid RenderPipeline (unlabeled)]).\n - While ",
+    "[decal-projection] GPU 错误（待归因，下一帧复测）: [Invalid RenderPipeline (unlabeled)] is invalid.\n - While encoding [RenderPassEncoder \"RenderPassForward-PassEncoder RT:WebgpuFramebuffer\"].SetPipeline([Invalid RenderPipeline (unlabeled)]).\n - While ",
+    "[decal-projection] GPU 错误（待归因，下一帧复测）: [Invalid RenderPipeline (unlabeled)] is invalid.\n - While encoding [RenderPassEncoder \"RenderPassForward-PassEncoder RT:WebgpuFramebuffer\"].SetPipeline([Invalid RenderPipeline (unlabeled)]).\n - While ",
+    "[decal-projection] GPU 错误（待归因，下一帧复测）: [Invalid RenderPipeline (unlabeled)] is invalid.\n - While encoding [RenderPassEncoder \"RenderPassForward-PassEncoder RT:WebgpuFramebuffer\"].SetPipeline([Invalid RenderPipeline (unlabeled)]).\n - While ",
+    "[decal-projection] GPU 错误（待归因，下一帧复测）: [Invalid RenderPipeline (unlabeled)] is invalid.\n - While encoding [RenderPassEncoder \"RenderPassForward-PassEncoder RT:WebgpuFramebuffer\"].SetPipeline([Invalid RenderPipeline (unlabeled)]).\n - While ",
+    "[decal-projection] GPU 错误（待归因，下一帧复测）: [Invalid RenderPipeline (unlabeled)] is invalid.\n - While encoding [RenderPassEncoder \"RenderPassForward-PassEncoder RT:WebgpuFramebuffer\"].SetPipeline([Invalid RenderPipeline (unlabeled)]).\n - While ",
+    "[decal-projection] GPU 错误（待归因，下一帧复测）: [Invalid RenderPipeline (unlabeled)] is invalid.\n - While encoding [RenderPassEncoder \"RenderPassForward-PassEncoder RT:WebgpuFramebuffer\"].SetPipeline([Invalid RenderPipeline (unlabeled)]).\n - While "
+  ]
+}

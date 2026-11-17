@@ -1,0 +1,748 @@
+/* 3DGS 场景标注编辑器 · 叠加层与 UI（与现有青蓝 HUD 风格一致） */
+
+.ed-layer {
+  position: absolute; inset: 0; z-index: 30;
+  pointer-events: none; overflow: hidden;
+}
+.ed-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.ed-doms { position: absolute; inset: 0; pointer-events: none; }
+.ed-layer.ed-drawing { cursor: crosshair; }
+
+/* ---------------- 点 / 展板 ---------------- */
+/* .ed-item 是唯一定位容器：position:absolute 在这里。
+   切勿用 className 覆盖掉它，否则点 / 展板会全部堆到左上角。 */
+.ed-item { position: absolute; pointer-events: auto; user-select: none; }
+.ed-pin {
+  display: flex; align-items: center; gap: 6px;
+  transform: translate(-50%, -50%); font-size: 13px;
+  opacity: var(--op, .95);
+}
+.ed-pin-dot {
+  display: grid; place-items: center; width: 26px; height: 26px;
+  border-radius: 50%; background: color-mix(in srgb, var(--c) 88%, #071018);
+  color: #04121a; font-size: 11px; font-weight: 700;
+  border: 2px solid #fff; box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 30%, transparent), 0 4px 12px #0008;
+}
+.ed-pin-label {
+  padding: 3px 9px; border-radius: 6px; white-space: nowrap;
+  background: #06131cdd; color: #e6f7ff; border: 1px solid color-mix(in srgb, var(--c) 55%, transparent);
+}
+.ed-pin.ed-far .ed-pin-label { opacity: .35; }
+.ed-item.ed-sel .ed-pin-dot { outline: 3px solid #fff; outline-offset: 3px; }
+.ed-item.ed-sel .ed-pin-label { border-color: #fff; }
+
+/* ---------------- 展板：悬浮矩形全息玻璃面板 ---------------- */
+.ed-board {
+  width: var(--w, 300px); height: var(--h, auto); transform-origin: 50% 100%;
+  opacity: var(--op, .95);
+  filter: drop-shadow(0 12px 30px #000a);
+  cursor: grab;
+}
+.ed-board:active { cursor: grabbing; }
+.ed-board-in {
+  position: relative; height: 100%; overflow: hidden;
+  display: flex; flex-direction: column;
+  background:
+    linear-gradient(155deg, color-mix(in srgb, var(--c) 16%, #05131dee) 0%, #04101ae8 55%, #020a12f2 100%);
+  border: 1px solid color-mix(in srgb, var(--c) 70%, #ffffff30);
+  border-radius: 14px;
+  padding: 12px 14px 10px;
+  color: #e8f8ff;
+  backdrop-filter: blur(10px) saturate(1.3);
+  box-shadow:
+    0 0 0 1px #ffffff14 inset,
+    0 0 26px color-mix(in srgb, var(--c) 30%, transparent),
+    0 18px 44px #000b;
+}
+/* 网格底纹 + 扫描线，营造全息投影质感 */
+.ed-board-grid {
+  position: absolute; inset: 0; pointer-events: none; opacity: .16;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--c) 80%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--c) 80%, transparent) 1px, transparent 1px);
+  background-size: 22px 22px;
+  mask-image: radial-gradient(120% 90% at 50% 0%, #000 40%, transparent 100%);
+}
+.ed-board-in::after {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--c), transparent);
+  opacity: .85;
+}
+.ed-board-hd {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding-bottom: 8px; margin-bottom: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--c) 40%, transparent);
+}
+.ed-board-ico {
+  display: grid; place-items: center; width: 20px; height: 20px; flex: none;
+  border-radius: 4px; font-size: 11px;
+  background: color-mix(in srgb, var(--c) 26%, transparent);
+  color: var(--c);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--c) 40%, transparent);
+}
+.ed-board-title {
+  flex: 1; font-size: 14px; font-weight: 700; letter-spacing: .02em;
+  color: #f2fbff; text-shadow: 0 0 12px color-mix(in srgb, var(--c) 55%, transparent);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ed-board-kind {
+  font-size: 10px; padding: 2px 7px; border-radius: 999px; flex: none;
+  color: var(--c); border: 1px solid color-mix(in srgb, var(--c) 55%, transparent);
+  background: color-mix(in srgb, var(--c) 14%, transparent);
+}
+/* 内容区在展板内部滚动（仍是三维展板本体，不是独立弹层） */
+.ed-board-body {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  overscroll-behavior: contain; scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--c) 55%, transparent) transparent;
+}
+.ed-board-body::-webkit-scrollbar { width: 5px; }
+.ed-board-body::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--c) 55%, transparent); border-radius: 3px; }
+.ed-board-text {
+  margin: 0; font-size: 12px; line-height: 1.7; color: #c6e4f2;
+  white-space: pre-wrap; word-break: break-word;
+}
+.ed-board-media { margin-top: 8px; }
+.ed-board-cap { font-size: 10px; color: #7fb6cc; margin-top: 4px; line-height: 1.4; }
+.ed-board-img {
+  width: 100%; max-height: 168px; object-fit: cover; display: block;
+  border-radius: 8px; border: 1px solid #ffffff20;
+}
+.ed-board-video {
+  width: 100%; max-height: 190px; border-radius: 8px; display: block;
+  border: 1px solid #ffffff20; background: #000;
+}
+/* 网页内容直接内嵌在三维展板里：iframe 就地渲染，不新开页面 */
+.ed-board-web {
+  position: relative; height: calc(var(--h, 210px) * .52); min-height: 88px;
+  border-radius: 8px; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--c) 50%, transparent);
+  background: #f8fafc;
+}
+.ed-board-web iframe { width: 100%; height: 100%; border: 0; background: #fff; pointer-events: auto; }
+/* 未选中时用透明遮罩接管点击（可选中 / 拖拽展板），选中后遮罩消失、网页可交互 */
+.ed-board-web::after {
+  content: ''; position: absolute; inset: 0; z-index: 2;
+  background: transparent; cursor: grab;
+}
+.ed-item.ed-sel .ed-board-web::after { display: none; }
+.ed-board-web-tag {
+  position: absolute; left: 6px; top: 6px; z-index: 3; pointer-events: none;
+  font-size: 10px; font-weight: 700; color: #e6f7ff;
+  background: #06131ccc; border: 1px solid color-mix(in srgb, var(--c) 55%, transparent);
+  border-radius: 999px; padding: 1px 7px;
+}
+.ed-board-link, .ed-board-note {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 12px; border-radius: 8px;
+  background: #ffffff0d; border: 1px dashed color-mix(in srgb, var(--c) 50%, transparent);
+  font-size: 11px; color: #a9d3e6;
+}
+.ed-board-link span { color: var(--c); font-weight: 700; }
+.ed-board-link em {
+  font-style: normal; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ed-board-note { background: #ffffff0a; border-style: solid; border-color: #ffffff18; }
+.ed-board-ft {
+  display: flex; align-items: center; gap: 6px; flex: none;
+  margin-top: 10px; padding-top: 7px;
+  border-top: 1px solid #ffffff14;
+  font-size: 10px; color: #7fb6cc; letter-spacing: .04em;
+}
+.ed-board-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--c); flex: none;
+  box-shadow: 0 0 8px var(--c);
+  animation: ed-blink 2.4s ease-in-out infinite;
+}
+@keyframes ed-blink { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+/* 四角科技感切角 */
+.ed-board-c {
+  position: absolute; width: 12px; height: 12px; pointer-events: none;
+  border-color: var(--c); border-style: solid; border-width: 0;
+  opacity: .9;
+}
+.ed-board-c.tl { top: 5px; left: 5px; border-top-width: 2px; border-left-width: 2px; border-radius: 4px 0 0 0; }
+.ed-board-c.tr { top: 5px; right: 5px; border-top-width: 2px; border-right-width: 2px; border-radius: 0 4px 0 0; }
+.ed-board-c.bl { bottom: 5px; left: 5px; border-bottom-width: 2px; border-left-width: 2px; border-radius: 0 0 0 4px; }
+.ed-board-c.br { bottom: 5px; right: 5px; border-bottom-width: 2px; border-right-width: 2px; border-radius: 0 0 4px 0; }
+/* 导引线：从展板底部连到场景锚点（展板悬浮于锚点上方） */
+.ed-board-lead {
+  position: absolute; left: 50%; top: 100%; width: 2px; height: var(--gap, 14px);
+  transform: translateX(-50%); transform-origin: 50% 0;
+  pointer-events: none; z-index: 2;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--c) 85%, transparent), transparent);
+}
+.ed-board-lead.ed-lead-long { box-shadow: 0 0 8px color-mix(in srgb, var(--c) 60%, transparent); }
+/* 末端锚点：编辑态可点击拖动（拖动结果吸附到最近碰撞 MESH），预览态只读 */
+.ed-board-lead-dot {
+  position: absolute; left: 50%; bottom: -6px; width: 11px; height: 11px; border-radius: 50%;
+  transform: translateX(-50%); background: var(--c); border: 2px solid #fff;
+  box-shadow: 0 0 12px var(--c); pointer-events: none; transition: transform .12s;
+}
+.ed-board-lead-dot.ed-anchor-draggable { pointer-events: auto; cursor: move; }
+/* 扩大命中范围（11px 圆点太小不好抓），并加一圈呼吸光环提示「可拖动」 */
+.ed-board-lead-dot.ed-anchor-draggable::before {
+  content: ''; position: absolute; inset: -9px; border-radius: 50%;
+}
+.ed-board-lead-dot.ed-anchor-draggable::after {
+  content: ''; position: absolute; inset: -5px; border-radius: 50%;
+  border: 1px solid var(--c); pointer-events: none;
+  animation: ed-anchor-pulse 2.2s ease-out infinite;
+}
+@keyframes ed-anchor-pulse {
+  0% { transform: scale(.7); opacity: .75; }
+  100% { transform: scale(1.7); opacity: 0; }
+}
+.ed-board-lead-dot.ed-anchor-draggable:hover { transform: translateX(-50%) scale(1.35); }
+.ed-item.ed-sel .ed-board-lead-dot.ed-anchor-draggable {
+  box-shadow: 0 0 0 3px #ffffff55, 0 0 18px var(--c);
+}
+/* 四角拖拽手柄：拖动可缩放展板；拖动面板本体可移动 */
+.ed-board-corner {
+  position: absolute; width: 12px; height: 12px; margin: -6px; border-radius: 50%;
+  background: var(--c); border: 2px solid #fff; box-shadow: 0 0 8px var(--c);
+  pointer-events: auto; opacity: .7; z-index: 3; transition: opacity .15s, transform .1s;
+}
+.ed-board-corner.tl { left: 0; top: 0; cursor: nw-resize; }
+.ed-board-corner.tr { right: 0; top: 0; cursor: ne-resize; }
+.ed-board-corner.bl { left: 0; bottom: 0; cursor: sw-resize; }
+.ed-board-corner.br { right: 0; bottom: 0; cursor: se-resize; }
+.ed-item.ed-sel .ed-board-corner { opacity: 1; }
+.ed-board:hover .ed-board-corner { opacity: 1; }
+.ed-board-corner:hover { transform: scale(1.25); }
+.ed-item.ed-sel .ed-board-in {
+  box-shadow:
+    0 0 0 1px #ffffff26 inset,
+    0 0 34px color-mix(in srgb, var(--c) 55%, transparent),
+    0 20px 50px #000c;
+}
+.ed-board.ed-far { opacity: calc(var(--op, .95) * .5); }
+
+/* ---------------- 三维实体屏：世界空间固定平面（四点单应透视） ----------------
+   JS 每帧把 4 个世界角点投影到屏幕，用 matrix3d 把这块 480×(480*h/w) 的
+   DOM 贴到透视四边形上；transform-origin:0 0 是关键，不能改成居中。 */
+.ed-screen {
+  transform-origin: 0 0; opacity: var(--op, .95);
+  cursor: pointer; will-change: transform;
+}
+.ed-screen-bezel {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  padding: 14px 14px 22px; border-radius: 10px;
+  background: linear-gradient(150deg, #1c2b35, #0a131b 45%, #050b11);
+  border: 2px solid color-mix(in srgb, var(--c) 55%, #64748b);
+  box-shadow:
+    0 0 0 1px #ffffff18 inset,
+    0 0 22px color-mix(in srgb, var(--c) 32%, transparent),
+    0 0 0 5px #0b141b,
+    0 14px 30px #000b;
+}
+.ed-screen-glass {
+  position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden;
+  border-radius: 4px; background: #020a12; border: 1px solid #000;
+  box-shadow: 0 0 18px color-mix(in srgb, var(--c) 25%, transparent) inset;
+}
+.ed-screen-video {
+  width: 100%; height: 100%; display: block; object-fit: cover; background: #020a12;
+}
+.ed-screen-scan {
+  position: absolute; inset: 0; pointer-events: none; opacity: .32;
+  background: repeating-linear-gradient(to bottom, transparent 0 3px, #0008 3px 4px);
+}
+.ed-screen-glare {
+  position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(115deg, #ffffff1c 0%, transparent 34%, transparent 68%, #ffffff0e 100%);
+}
+.ed-screen-top {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  height: 27px; padding: 0 2px; color: #dff2fb;
+}
+.ed-screen-ico { color: var(--c); font-size: 13px; }
+.ed-screen-title {
+  flex: 1; min-width: 0; font-size: 13px; font-weight: 700;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ed-screen-tag {
+  flex: none; font-size: 9px; letter-spacing: .1em; color: var(--c);
+  border: 1px solid color-mix(in srgb, var(--c) 50%, transparent);
+  border-radius: 3px; padding: 1px 5px;
+}
+.ed-screen-foot {
+  display: flex; align-items: center; gap: 7px; flex: none;
+  height: 17px; padding: 0 2px; font-size: 10px; color: #7fb6cc;
+}
+.ed-screen-led {
+  width: 6px; height: 6px; border-radius: 50%; background: #34d399;
+  box-shadow: 0 0 8px #34d399; animation: ed-blink 1.6s ease-in-out infinite;
+}
+.ed-screen-screw {
+  position: absolute; width: 5px; height: 5px; border-radius: 50%;
+  background: #64748b; box-shadow: 0 0 0 1px #0008 inset;
+}
+.ed-screen-screw.tl { top: 4px; left: 4px; }
+.ed-screen-screw.tr { top: 4px; right: 4px; }
+.ed-screen-screw.bl { bottom: 4px; left: 4px; }
+.ed-screen-screw.br { bottom: 4px; right: 4px; }
+/* 支架在屏体下沿之外，仍受同一个 matrix3d 变换，透视会一起变形 */
+.ed-screen-stand {
+  position: absolute; left: 50%; top: 100%; width: 78px; height: 42px;
+  transform: translateX(-50%);
+  background: linear-gradient(90deg, #0a131b, #263642 42%, #0a131b);
+  border: 1px solid #ffffff14;
+  clip-path: polygon(38% 0, 62% 0, 78% 100%, 22% 100%);
+}
+.ed-screen-backplate {
+  position: absolute; inset: 0; display: none; place-items: center;
+  border-radius: 10px; font-size: 14px; letter-spacing: .22em; color: #94a3b8;
+  background: repeating-linear-gradient(45deg, #111c24, #111c24 8px, #0b141b 8px, #0b141b 16px);
+  border: 2px solid #334155;
+}
+.ed-screen.ed-screen-back .ed-screen-bezel,
+.ed-screen.ed-screen-back .ed-screen-stand { display: none; }
+.ed-screen.ed-screen-back .ed-screen-backplate { display: grid; }
+.ed-item.ed-sel .ed-screen-bezel {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px #ffffff40,
+    0 0 40px color-mix(in srgb, var(--c) 65%, transparent),
+    0 0 0 5px #0b141b, 0 14px 30px #000b;
+}
+
+/* ---------------- 线 / 面 / 测量 ---------------- */
+.ed-g { pointer-events: none; }
+.ed-shape { pointer-events: stroke; cursor: pointer; }
+.ed-vertex { stroke: #fff; stroke-width: 1.2; pointer-events: none; }
+.ed-measure { font-size: 12px; font-weight: 700; paint-order: stroke; stroke: #04121a; stroke-width: 3px; }
+.ed-g.ed-sel .ed-shape { stroke-width: 4; filter: drop-shadow(0 0 6px #fff8); }
+
+/* ---------------- 动线：贴合模型的等宽「箭头形状多边形」链 ----------------
+   每个 .ed-flow-arrow-seg 自身就是一个带箭头尖的多边形（箭头由轮廓形成），
+   没有任何渐变底带 / 带内小箭头图标；填充透明度由 JS 按段序微调以强化方向感。 */
+.ed-flow-chain { pointer-events: none; }
+.ed-flow-arrow-seg {
+  pointer-events: all; cursor: pointer;
+  fill: currentColor; stroke: currentColor;
+  stroke-width: 1.2; stroke-opacity: .9; stroke-linejoin: round;
+  filter: drop-shadow(0 0 5px color-mix(in srgb, currentColor 55%, transparent));
+}
+.ed-flow-arrow-seg:hover { stroke-opacity: 1; }
+.ed-g.ed-sel .ed-flow-arrow-seg { stroke-width: 2; stroke-opacity: 1; }
+
+/* 逐注记深度检测：开启后被遮挡的标注由 overlay 直接移除，这里只做视觉兜底 */
+.ed-item.ed-occluded { opacity: .08; pointer-events: none; }
+
+/* 绘制草稿：已落顶点手柄 + 跟随鼠标的橡皮筋 + 十字准星 */
+.ed-draft { fill: none; stroke: #fff; stroke-width: 2; stroke-dasharray: 5 5; opacity: .85; }
+.ed-draft-rubber { fill: none; stroke: #7ff3ff; stroke-width: 2; stroke-dasharray: 3 4; opacity: .9; }
+.ed-draft-dot { fill: #04121a; stroke: #7ff3ff; stroke-width: 2; }
+.ed-draft-cross line { stroke: #7ff3ff; stroke-width: 1.4; opacity: .9; }
+.ed-draft-cross circle { fill: none; stroke: #7ff3ff; stroke-width: 1.4; opacity: .9; }
+
+/* ---------------- 编辑 UI ---------------- */
+.ed-ui { position: fixed; inset: 0; z-index: 9000; pointer-events: none; font: 13px/1.5 "Microsoft YaHei", system-ui, sans-serif; color: #dff2fb; }
+.ed-ui > * { pointer-events: auto; }
+
+.ed-toolbar {
+  position: absolute; top: 0; left: 0; right: 0; height: 46px;
+  display: flex; align-items: center; gap: 8px;
+  /* 右侧 140px 留给父页的「× 退出编辑」浮标，视觉上是同一条工具栏 */
+  padding: 0 140px 0 14px;
+  background: #04131cf2; border-bottom: 1px solid #1b4b60;
+  box-shadow: 0 4px 20px #0007;
+}
+.ed-logo { font-weight: 700; letter-spacing: .08em; color: #38d6f5; margin-right: 8px; white-space: nowrap; }
+.ed-tools { display: flex; gap: 3px; }
+.ed-toolbar button, .ed-prop-btns button, .ed-layers button {
+  background: #0b2534; color: #cfeaf6; border: 1px solid #20506a;
+  border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 12px;
+}
+.ed-toolbar button:hover { background: #14425a; }
+.ed-tools button { min-width: 48px; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 3px 8px; }
+.ed-tools button i { font-style: normal; font-size: 15px; line-height: 1; }
+.ed-tools button em { font-style: normal; font-size: 10px; opacity: .8; }
+.ed-tools button.ed-on { background: #0e6a86; border-color: #38d6f5; color: #fff; }
+.ed-sep { width: 1px; height: 22px; background: #20506a; margin: 0 4px; }
+/* 深度开关 / 绘制平面距离 */
+.ed-depth { min-width: 68px; font-weight: 700; letter-spacing: .04em; }
+.ed-depth.ed-on { background: #0e6a86; border-color: #38d6f5; color: #fff; }
+.ed-depth.ed-depth-off { background: #3a2130; border-color: #f472b6; color: #ffd6ea; }
+.ed-plane {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: #9fc6d8; white-space: nowrap;
+}
+.ed-plane input[type="range"] { width: 76px; accent-color: #38d6f5; cursor: pointer; }
+.ed-plane span { min-width: 34px; color: #7fd3ea; font-variant-numeric: tabular-nums; }
+.ed-plane.ed-plane-off { opacity: .38; pointer-events: none; }
+.ed-preview { margin-left: auto; }
+
+/* 常驻键位提示：编辑模式的「其他 UI」只保留编辑器自己这一套 */
+.ed-wasd {
+  position: absolute; top: 46px; left: 0; right: 0; height: 24px;
+  display: flex; align-items: center; padding: 0 14px; gap: 4px;
+  font-size: 11px; color: #86b7c9; letter-spacing: .02em;
+  background: #061a26d9; border-bottom: 1px solid #123a4c;
+}
+.ed-wasd b { color: #7fd3ea; font-weight: 700; }
+
+.ed-left, .ed-right {
+  position: absolute; top: 70px; bottom: 30px; width: 240px;
+  background: #061822f5; border-right: 1px solid #1b4b60;
+  overflow: auto; padding: 10px;
+}
+.ed-left { left: 0; }
+.ed-right { right: 0; left: auto; width: 262px; border-right: 0; border-left: 1px solid #1b4b60; }
+.ed-sec-hd { display: flex; align-items: center; justify-content: space-between; margin: 10px 0 6px; color: #7fd3ea; font-size: 12px; letter-spacing: .05em; }
+.ed-sec-hd button { background: none; border: 1px solid #20506a; color: #7fd3ea; border-radius: 4px; cursor: pointer; }
+.ed-sec-hd small, .ed-count { color: #6f9cb0; }
+.ed-layer-row, .ed-list-row, .ed-tour-row {
+  display: flex; align-items: center; gap: 7px; padding: 5px 6px;
+  border-radius: 5px; cursor: pointer; font-size: 12px;
+}
+.ed-layer-row:hover, .ed-list-row:hover { background: #0e2c3c; }
+.ed-layer-row.ed-off { opacity: .45; }
+.ed-layer-row button { padding: 1px 6px; }
+.ed-layer-row i, .ed-list-row i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; font-style: normal; text-align: center; line-height: 1; }
+.ed-layer-row span, .ed-list-row span, .ed-tour-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ed-layer-row small, .ed-list-row small, .ed-tour-row small { color: #6f9cb0; font-size: 10px; }
+.ed-list-row.ed-active { background: #0e6a86; color: #fff; }
+.ed-list-row.ed-hidden { opacity: .4; }
+
+/* ---------------- 标注分组管理 ---------------- */
+.ed-groups { display: flex; flex-direction: column; gap: 3px; }
+.ed-group-row {
+  display: flex; align-items: center; gap: 4px;
+  padding: 3px 4px; border: 1px solid transparent; border-radius: 5px;
+  cursor: pointer; font-size: 11px;
+}
+.ed-group-row:hover { background: #0e2c3c; }
+.ed-group-row.ed-group-active { background: #0b3a4d; border-color: #38d6f5; }
+.ed-group-row.ed-off { opacity: .45; }
+.ed-group-row i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.ed-group-row .ed-ib { padding: 0 3px; font-size: 10px; flex: none; }
+.ed-group-name {
+  flex: 1; min-width: 0; padding: 2px 3px; font: inherit; color: #cfeaf6;
+  background: transparent; border: 1px solid transparent; border-radius: 3px;
+}
+.ed-group-name:hover, .ed-group-name:focus { background: #04131c; border-color: #20506a; outline: none; }
+.ed-group-row small { color: #6f9cb0; font-size: 10px; flex: none; }
+.ed-group-tip { font-size: 10px; line-height: 1.5; color: #6f9cb0; padding: 3px 4px 4px; }
+/* 标注列表中的组头（可折叠） */
+.ed-group-hd {
+  display: flex; align-items: center; gap: 5px;
+  margin: 8px 0 2px; padding: 4px 6px; border-radius: 4px;
+  background: color-mix(in srgb, var(--gc, #38d6f5) 12%, #08202c);
+  border-left: 2px solid var(--gc, #38d6f5);
+  cursor: pointer; font-size: 11px;
+}
+.ed-group-hd:hover { background: color-mix(in srgb, var(--gc, #38d6f5) 22%, #08202c); }
+.ed-group-hd span { color: var(--gc, #38d6f5); }
+.ed-group-hd i { width: 6px; height: 6px; border-radius: 50%; background: var(--gc, #38d6f5); flex: none; }
+.ed-group-hd b { flex: 1; min-width: 0; color: #bfe6f5; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ed-group-hd small { color: #6f9cb0; font-size: 10px; }
+.ed-group-hd em { font-style: normal; color: #ffb4b4; font-size: 9px; }
+.ed-group-hd.ed-off { opacity: .5; }
+.ed-list-btns { margin-left: auto; display: none; gap: 3px; flex: none; }
+.ed-list-row:hover .ed-list-btns, .ed-list-row.ed-active .ed-list-btns { display: flex; }
+.ed-ib {
+  background: none; border: 1px solid #20506a; color: #7fd3ea; border-radius: 4px;
+  cursor: pointer; font-size: 11px; padding: 0 5px; line-height: 18px;
+}
+.ed-ib:hover { background: #0e2c3c; }
+.ed-ib-del { color: #ff9c9c; border-color: #7a3540; }
+.ed-ib-del:hover { background: #3a1620; }
+.ed-search {
+  width: 100%; box-sizing: border-box; background: #0b2534; color: #dff2fb;
+  border: 1px solid #20506a; border-radius: 5px; padding: 5px 8px; margin-bottom: 6px; font-size: 12px;
+}
+.ed-empty { color: #6f9cb0; font-size: 11px; padding: 10px 4px; text-align: center; }
+.ed-prop-empty { margin-top: 40px; }
+.ed-right label { display: block; margin: 8px 0; font-size: 11px; color: #9fc6d8; }
+.ed-right input, .ed-right textarea, .ed-right select {
+  width: 100%; box-sizing: border-box; margin-top: 3px;
+  background: #0b2534; color: #dff2fb; border: 1px solid #20506a;
+  border-radius: 5px; padding: 5px 7px; font-size: 12px; font-family: inherit;
+}
+.ed-right input[type="color"] { height: 30px; padding: 2px; }
+.ed-right input[type="range"] { padding: 0; }
+.ed-chk { display: flex !important; align-items: center; gap: 6px; }
+.ed-chk input { width: auto !important; margin: 0 !important; }
+.ed-coord { display: flex; flex-wrap: wrap; gap: 4px; margin: 10px 0; }
+.ed-coord code { background: #0b2534; border: 1px solid #174055; border-radius: 4px; padding: 2px 5px; font-size: 10px; color: #7fd3ea; }
+.ed-prop-btns { display: flex; flex-wrap: wrap; gap: 5px; }
+.ed-danger { color: #ff9c9c !important; border-color: #7a3540 !important; }
+.ed-prop-hint {
+  font-size: 10px; line-height: 1.6; color: #6f9cb0;
+  padding: 6px 8px; margin: 4px 0 8px;
+  background: #0b2534; border-left: 2px solid #38d6f5; border-radius: 0 4px 4px 0;
+}
+.ed-prop-hint b { color: #7fe3fb; }
+
+/* ---------------- 拾取后属性面板自动展示的只读内容预览 ---------------- */
+.ed-pick-view {
+  padding: 10px; margin: 2px 0 12px; border-radius: 8px;
+  background: linear-gradient(155deg, #0b2a3a, #061822);
+  border: 1px solid #20506a; border-left: 2px solid #38d6f5;
+  box-shadow: 0 6px 18px #0007;
+}
+.ed-pick-kicker { font-size: 10px; letter-spacing: .06em; color: #7fd3ea; margin-bottom: 5px; }
+.ed-pick-view h4 { margin: 0 0 6px; font-size: 13px; color: #f2fbff; line-height: 1.4; word-break: break-word; }
+.ed-pick-view p {
+  margin: 0; font-size: 11px; line-height: 1.65; color: #b9d9e8;
+  white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow: auto;
+}
+.ed-pick-media { margin-top: 8px; }
+.ed-pick-img, .ed-pick-video {
+  width: 100%; max-height: 130px; border-radius: 6px; display: block; border: 1px solid #20506a;
+}
+.ed-pick-video { background: #000; }
+.ed-pick-web {
+  position: relative; height: 120px; border-radius: 6px; overflow: hidden;
+  border: 1px solid #20506a; background: #fff;
+}
+.ed-pick-web iframe { width: 100%; height: 100%; border: 0; }
+.ed-pick-web span {
+  position: absolute; left: 5px; top: 5px; font-size: 9px; padding: 1px 6px;
+  border-radius: 999px; background: #06131ccc; color: #7fe3fb;
+}
+.ed-pick-none, .ed-pick-ext, .ed-pick-note {
+  font-size: 10px; color: #7fb6cc; padding: 7px 8px; border-radius: 5px;
+  background: #ffffff0a; border: 1px dashed #20506a; word-break: break-all;
+}
+.ed-pick-cap { font-size: 10px; color: #7fb6cc; margin-top: 4px; }
+.ed-pick-link { display: block; margin-top: 8px; font-size: 11px; color: #7fe3fb; word-break: break-all; }
+.ed-pick-link[hidden] { display: none; }
+
+.ed-status {
+  position: absolute; bottom: 0; left: 0; right: 0; height: 30px;
+  display: flex; align-items: center; justify-content: space-between; padding: 0 14px;
+  background: #04131cf2; border-top: 1px solid #1b4b60; font-size: 11px; color: #8fc5d9;
+}
+.ed-status span:first-child { color: #38d6f5; }
+
+/* 预览态：只保留状态栏与「返回编辑」，其余收起，标注仍可点击 */
+.ed-ui.ed-is-preview .ed-left,
+.ed-ui.ed-is-preview .ed-right,
+.ed-ui.ed-is-preview .ed-tools,
+.ed-ui.ed-is-preview .ed-plane,
+.ed-ui.ed-is-preview .ed-depth,
+.ed-ui.ed-is-preview .ed-wasd,
+.ed-ui.ed-is-preview .ed-sep,
+.ed-ui.ed-is-preview .ed-toolbar button:not(.ed-preview) { display: none; }
+.ed-ui.ed-is-preview .ed-toolbar { background: #04131cc0; }
+/* 预览态拾取标注后：右侧面板以「只读内容预览」重新出现，其余编辑控件仍隐藏 */
+.ed-ui.ed-is-preview.ed-has-pick .ed-right { display: block; }
+.ed-ui.ed-is-preview .ed-prop > *:not(.ed-pick-sec):not(.ed-pick-view) { display: none; }
+.ed-ui.ed-is-preview .ed-pick-view { margin-top: 12px; }
+
+/* 编辑模式：iframe 内 Viewer 自带的底部工具条 / 提示 / 摇杆全部收起，
+   只保留三维画面 + 编辑器 UI（父页 #stage 的 HUD 由 fusion.css 隐藏） */
+html.mg-editor-on .sse-controlsWrap,
+html.mg-editor-on .sse-controlsHint,
+html.mg-editor-on .sse-infoPanel,
+html.mg-editor-on .sse-joystick,
+html.mg-editor-on .sse-panel { display: none !important; }
+html.mg-editor-on #mg-stage { cursor: crosshair; }
+
+.ed-fatal { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); z-index: 99999;
+  background: #4a1620; color: #ffd9d9; padding: 12px 20px; border-radius: 8px; }
+
+@media (max-width: 900px) {
+  .ed-left { width: 180px; } .ed-right { width: 200px; }
+  .ed-tools button em { display: none; }
+  .ed-wasd { font-size: 10px; overflow: hidden; white-space: nowrap; }
+}
+
+/* ================================================================
+   编辑模式 v2：全局碰撞体开关 / 选中高亮与锁定 / 动线草稿 /
+   贴面矩形（MESH 纹理面）
+   ================================================================ */
+
+/* 工具栏新增按钮后允许横向滚动，窄屏也不把控件挤没 */
+.ed-toolbar { overflow-x: auto; scrollbar-width: none; }
+.ed-toolbar::-webkit-scrollbar { display: none; }
+.ed-toolbar > * { flex: none; }
+.ed-mesh { min-width: 82px; font-weight: 700; letter-spacing: .04em; }
+.ed-mesh.ed-on { background: #0e6a86; border-color: #38d6f5; color: #fff; }
+.ed-mesh.ed-mesh-off { background: #102a38; border-color: #20506a; color: #9fc6d8; }
+
+/* ---------------- 选中高亮 / 其他标注锁定 ---------------- */
+.ed-item.ed-locked, .ed-g.ed-locked {
+  opacity: .28;
+  filter: grayscale(.75);
+  pointer-events: none;
+}
+.ed-list-row.ed-locked { opacity: .45; }
+.ed-list-row.ed-locked .ed-ib { pointer-events: none; opacity: .4; }
+.ed-lock-tag { color: #f59e0b; font-size: 10px; font-style: normal; flex: none; }
+/* 选中对象：明确的白色描边 + 光晕，和变暗的锁定对象形成对比 */
+.ed-item.ed-sel .ed-pin-dot { box-shadow: 0 0 0 3px #fff, 0 0 18px 6px #38d6f5; }
+.ed-item.ed-sel .ed-board-in {
+  outline: 2px solid #fff; outline-offset: 3px;
+  box-shadow: 0 0 0 6px #38d6f555, 0 12px 34px #000c;
+}
+.ed-item.ed-sel .ed-screen-bezel { outline: 2px solid #fff; outline-offset: 3px; }
+.ed-g.ed-sel .ed-decal-outline { stroke-width: 3; filter: drop-shadow(0 0 6px #fff); }
+.ed-list-row.ed-active { box-shadow: inset 3px 0 0 #fff; }
+
+/* ---------------- 绘制草稿：双层线 + 动线箭头预览 ----------------
+   3DGS 画面本身很亮，原来 2px 白色虚线几乎看不见，容易被误判成
+   「动线只画出了点」。深色光晕垫底 + 亮色主线 + 箭头链实时预览。 */
+.ed-draft-halo {
+  fill: none; stroke: #04121ae0; stroke-width: 7;
+  stroke-linejoin: round; stroke-linecap: round; opacity: .9;
+}
+.ed-draft {
+  fill: none; stroke: #eafcff; stroke-width: 3; stroke-dasharray: 8 5;
+  stroke-linejoin: round; stroke-linecap: round; opacity: 1;
+}
+.ed-draft-flow { pointer-events: none; }
+.ed-draft-flow-seg {
+  fill: #7ff3ff; fill-opacity: .34; stroke: #bff6ff; stroke-opacity: .9;
+  stroke-width: 1.2; stroke-linejoin: round; pointer-events: none;
+}
+
+/* ---------------- 贴面矩形：贴合 MESH 的纹理面 ---------------- */
+.ed-decal-cells { pointer-events: none; }
+.ed-decal-cell {
+  fill: currentColor; fill-opacity: .16;
+  stroke: currentColor; stroke-opacity: .22; stroke-width: .6;
+  pointer-events: all; cursor: pointer;
+}
+.ed-decal-cell:hover { fill-opacity: .34; }
+.ed-g.ed-sel .ed-decal-cell { fill-opacity: .26; stroke-opacity: .45; }
+.ed-decal-outline {
+  fill: none; stroke: currentColor; stroke-width: 2.2; stroke-opacity: .95;
+  stroke-linejoin: round; pointer-events: none;
+  filter: drop-shadow(0 0 4px currentColor);
+}
+.ed-decal-label {
+  font-size: 12px; font-weight: 700; fill: #eafcff;
+  paint-order: stroke; stroke: #04121a; stroke-width: 3px; pointer-events: none;
+}
+.ed-decal { opacity: var(--op, .95); }
+.ed-decal-surface {
+  position: relative; width: 100%; height: 100%; overflow: hidden;
+  box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--c) 70%, transparent);
+  background: #06131c66;
+}
+.ed-decal-video {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: fill; opacity: .72; mix-blend-mode: screen;
+}
+.ed-decal-hatch {
+  position: absolute; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(45deg,
+    color-mix(in srgb, var(--c) 16%, transparent) 0 8px,
+    transparent 8px 18px);
+}
+.ed-decal-tag {
+  position: absolute; left: 8px; bottom: 8px;
+  padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700;
+  color: #eafcff; background: #04131ccc;
+  border: 1px solid color-mix(in srgb, var(--c) 60%, transparent);
+}
+
+/* ---------------- 贴花投影机 OBB（屏幕空间延迟贴花） ---------------- */
+/* projector 模式下编辑器只画 OBB 线框 + 轴向手柄，不再放单应视频 DOM；
+   颜色随选中对象 currentColor，与 _drawDecal 的 n.g.style.color = c 联动。 */
+.ed-decal-obb { pointer-events: none; }
+.ed-decal-obb-edge {
+  fill: none; stroke: currentColor; stroke-width: 1.6; stroke-opacity: .92;
+  stroke-linejoin: round; stroke-linecap: round;
+  filter: drop-shadow(0 0 3px currentColor);
+}
+.ed-g.ed-sel .ed-decal-obb-edge { stroke-width: 2.2; }
+.ed-decal-obb-handles { pointer-events: none; }
+.ed-decal-obb-handle {
+  fill: #eafcff; fill-opacity: .92;
+  stroke: currentColor; stroke-width: 2; stroke-opacity: .95;
+  pointer-events: all; cursor: grab;
+  filter: drop-shadow(0 0 3px currentColor);
+}
+.ed-decal-obb-handle:active { cursor: grabbing; }
+.ed-decal-obb-handle[data-axis="move"] {
+  fill: currentColor; fill-opacity: 1;
+  r: 6;
+}
+.ed-g.ed-sel .ed-decal-obb-handle { stroke-width: 2.4; }
+
+/* ---------------- 贴面深度反算状态 ---------------- */
+.ed-prop-status {
+  margin: 2px 0 8px; padding: 6px 8px; border-radius: 4px;
+  font-size: 10px; line-height: 1.5; color: #a5f3fc;
+  background: #062b3acc; border: 1px solid #1b5e78;
+  word-break: break-all;
+}
+.ed-prop-status code, .ed-prop-hint code {
+  font-family: ui-monospace, Consolas, monospace; color: #7fe3fb;
+}
+
+/* ---------------- 本地视频（工程内片源 / 本机文件） ---------------- */
+.ed-local-video { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
+.ed-local-video button,
+.ed-file-btn {
+  display: block; width: 100%; box-sizing: border-box; text-align: center;
+  padding: 7px 8px; border-radius: 5px; cursor: pointer;
+  font-size: 11px; font-weight: 700; letter-spacing: .02em;
+  background: #0b3a4d; color: #bff2ff; border: 1px solid #1b6e8c;
+}
+.ed-local-video button:hover,
+.ed-file-btn:hover { background: #0e5871; border-color: #38d6f5; color: #fff; }
+.ed-file-btn { position: relative; overflow: hidden; background: #102a38; color: #9fc6d8; }
+.ed-file-btn input[type=file] {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: pointer;
+}
+
+/* ---------------- 三维屏三轴 gizmo（X/Y/Z 轴柄 + 中心选择柄） ---------------- */
+.ed-screen-gizmo {
+  position: absolute; width: 0; height: 0; z-index: 12;
+  pointer-events: none;
+}
+.ed-gizmo-svg {
+  position: absolute; left: -130px; top: -130px;
+  overflow: visible; pointer-events: none;
+}
+.ed-gizmo-axis { stroke-width: 3; stroke-linecap: round; pointer-events: none; }
+.ed-gizmo-axis[data-axis="x"] { stroke: #f87171; }
+.ed-gizmo-axis[data-axis="y"] { stroke: #4ade80; }
+.ed-gizmo-axis[data-axis="z"] { stroke: #60a5fa; }
+.ed-gizmo-head { pointer-events: none; }
+.ed-gizmo-head[data-axis="x"] { fill: #f87171; }
+.ed-gizmo-head[data-axis="y"] { fill: #4ade80; }
+.ed-gizmo-head[data-axis="z"] { fill: #60a5fa; }
+.ed-gizmo-hit {
+  fill: transparent; stroke: transparent; cursor: grab; pointer-events: auto;
+}
+.ed-gizmo-hit:hover { fill: #ffffff2e; }
+.ed-gizmo-hit:active { cursor: grabbing; }
+.ed-screen-gizmo-hub {
+  position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px;
+  border-radius: 50%; background: #fff; box-shadow: 0 0 6px #22d3ee;
+  pointer-events: none;
+}
+.ed-gizmo-tip {
+  position: absolute; left: 16px; top: -30px; white-space: nowrap;
+  font-size: 10px; color: #bff2ff; background: #04131cd9; padding: 2px 6px;
+  border-radius: 3px; pointer-events: none;
+}
+.ed-item.ed-screen.ed-sel { cursor: move; }
+
+/* ---------------- 右键上下文菜单（Figma / Miro 式对象操作） ---------------- */
+.ed-ctx {
+  position: fixed; z-index: 99999; min-width: 150px; padding: 4px;
+  background: #06131cf5; border: 1px solid #1b4b60; border-radius: 8px;
+  box-shadow: 0 10px 30px #000b; font: 12px/1.4 "Microsoft YaHei", system-ui, sans-serif;
+}
+.ed-ctx button {
+  display: block; width: 100%; text-align: left; padding: 6px 10px; cursor: pointer;
+  background: none; border: 0; border-radius: 5px; color: #dff2fb; font: inherit;
+}
+.ed-ctx button:hover { background: #0e6a86; color: #fff; }
+.ed-ctx button:last-child { color: #ff9c9c; }
+.ed-ctx button:last-child:hover { background: #3a1620; }
+
+/* ---------------- 框选矩形（Shift+空白拖拽） ---------------- */
+.ed-marquee {
+  position: absolute; display: none; z-index: 40; pointer-events: none;
+  border: 1px solid #38e0ff; background: #38e0ff22; border-radius: 2px;
+}
