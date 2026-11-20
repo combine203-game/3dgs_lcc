@@ -284,11 +284,14 @@ function loop() {
   if (document.hidden) return;
   if (isEditorOn()) {                       // 双保险：桥接事件之外的兜底
     if (state.overlay) teardownOverlay();
+    if (state.decal) teardownDecalRuntime();
     return;
   }
   try {
     const ov = state.overlay || ensureOverlay();
     ov?.frame();
+    // 引擎 / Picker 就绪后才建：就绪前每次都会早退，代价只是一次时间戳比较
+    if (!state.decal) ensureDecalRuntime();
   } catch (err) {
     state.failAt = Date.now();
     teardownOverlay();
@@ -369,6 +372,9 @@ function applyView(view) {
   writeView(view);
   state.store.setView(view);
   if (!state.store.list(state.scene).length) teardownOverlay();
+  // 显隐一变，GPU 投射实例必须同步增减：否则「图层树里关掉了贴花，
+  // 画面上视频还在投」。
+  syncDecalRuntime();
   syncPanel();
   notifyParent('view');
 }
@@ -479,6 +485,8 @@ function refreshDoc(reason) {
     }
     state.sig = docSig();
     if (!state.store.list(state.scene).length) teardownOverlay();
+    // 文档变了（编辑器刚保存 / 别的标签页改动）：投射实例跟着重喂
+    syncDecalRuntime();
     syncPanel();
     notifyParent(reason || 'refresh');
   } catch (err) {
@@ -492,6 +500,8 @@ function boot() {
 
   document.addEventListener('mg-editor-on', () => {
     teardownOverlay();
+    // 编辑器会自己建一份投射管理器：浏览态这份必须先撤，避免双份投射
+    teardownDecalRuntime();
     if (state.panel) state.panel.setOpen(false);
     if (state.btn) state.btn.classList.remove('is-on');
     notifyEditorMode(true);
@@ -540,6 +550,11 @@ window.__mgBrowseAnn = {
     panel: !!(state.panel && state.panel.isOpen()),
     docSig: state.sig
   }),
+  /** 贴花投射诊断：enabled / instances / pickReady / degraded / gpuErrors。
+   *  浏览态「看不到投射视频」的排查入口（与编辑器 decalMgr.debug() 同口径）。 */
+  decalStats: () => (state.decal ? state.decal.stats() : state.decal),
+  /** 强制重喂一次投射实例（诊断 / 父页在外部改动文档后调用） */
+  syncDecals: () => { syncDecalRuntime(); return 1; },
   /** DOM 断言辅助：叠加层根节点是否挂在 #mg-stage 上 */
   layerEl: () => document.querySelector('#mg-stage .mg-ann-layer') || null
 };
