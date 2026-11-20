@@ -142,12 +142,23 @@ export async function loadShaderSources(modulePath) {
 if (process.argv[1] && process.argv[1].endsWith('glsl-lint.mjs')) {
   const target = new URL('../web/engine/decal-shaders.js', import.meta.url).href;
   const s = await loadShaderSources(target);
+  const mod = await import(target);
   const g = lintShader(s.glsl, { entry: 'main', uniforms: s.uniforms });
   const w = lintShader(s.wgsl, { entry: 'fragmentMain', uniforms: s.uniforms });
   const vg = lintShader(s.vertexGLSL, { entry: 'main' });
   const vw = lintShader(s.vertexWGSL, { entry: 'vertexMain' });
+  // 标准三段式 Shadow-Map Decal 的 Pass3 cube shader（GLSL/WGSL 双份）
+  const shadowU = mod.DECAL_SHADOW_UNIFORM_NAMES || [];
+  const sgv = lintShader(mod.DECAL_SHADOW_VERTEX_GLSL || '', { entry: 'main' });
+  const sgw = lintShader(mod.DECAL_SHADOW_VERTEX_WGSL || '', { entry: 'vertexMain' });
+  const sfv = lintShader(mod.DECAL_SHADOW_FRAGMENT_GLSL || '', { entry: 'main', uniforms: shadowU });
+  const sfw = lintShader(mod.DECAL_SHADOW_FRAGMENT_WGSL || '', { entry: 'fragmentMain', uniforms: shadowU });
   let bad = 0;
-  for (const [name, r] of [['fragment GLSL', g], ['fragment WGSL', w], ['vertex GLSL', vg], ['vertex WGSL', vw]]) {
+  for (const [name, r] of [
+    ['fragment GLSL', g], ['fragment WGSL', w], ['vertex GLSL', vg], ['vertex WGSL', vw],
+    ['shadow vertex GLSL', sgv], ['shadow vertex WGSL', sgw],
+    ['shadow fragment GLSL', sfv], ['shadow fragment WGSL', sfw]
+  ]) {
     if (r.ok) { console.log('  PASS  ' + name); }
     else { bad++; console.log('  FAIL  ' + name); r.issues.forEach(i => console.log('        - ' + i)); }
   }

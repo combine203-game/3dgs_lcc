@@ -133,7 +133,9 @@ async function main() {
     '/editor/editor.css', '/editor/bridge.js', '/editor/editor.js',
     '/editor/schema.js', '/editor/store.js', '/editor/picking.js',
     '/editor/overlay.js', '/editor/panel.js', '/editor/mesh-pick.js',
-    '/editor/sample.json', '/app.js', '/viewer/index.js'];
+    '/editor/sample.json', '/app.js', '/viewer/index.js',
+    // 浏览态标注层 + 场景图层面板（编辑器标注的浏览态只读渲染与显隐控制）
+    '/browse-annotations.js', '/browse-ann-ui.js'];
   let okCount = 0;
   for (const u of urls) {
     try {
@@ -209,7 +211,7 @@ async function main() {
   check('退出按钮可见', s2.exitVisible === true);
   check('iframe 标记编辑类', s2.cls === true);
   check('编辑器已挂载', s2.mounted === true && s2.ed === true);
-  check('工具栏 8 个工具（含三维屏 / 贴面矩形）', s2.tools === 8, s2.tools);
+  check('工具栏 9 个工具（含三维屏 / 贴面矩形 / 透视贴花）', s2.tools === 9, s2.tools);
   check('深度开关存在', /深度/.test(s2.depth || ''), s2.depth);
   check('WASD 提示存在', s2.wasd === true);
   check('MESH 拾取就绪', s2.mesh === 'ready' && s2.tris > 0, s2.mesh + '/' + s2.tris);
@@ -1645,6 +1647,28 @@ async function main() {
     for(let i=0;i<40&&!ed.store.get(made.id)?.projector;i++)await sleep(100);
     out.madeProjector=!!ed.store.get(made.id)?.projector;
 
+    // 防回归：投影机异步失败（projector=null）时，旧 surface 网格多边形会退化成
+    // 细长尖刺。现在应改为屏幕空间占位框（rect 元素），且绝不生成 .ed-decal-cell。
+    // store change 会触发 ensureDecalProjectors 自动重建；stub 成失败以稳定模拟
+    // 「投影机异步生成失败」的真实场景（rebuildDecalProjector 取不到深度会 return，不写回）。
+    const origUR2=ed.picker.unprojectRect;
+    ed.picker.unprojectRect=async()=>null;
+    const savedProj=ed.store.get(decal.id).projector;
+    ed.store.update(decal.id,{projector:null});
+    await sleep(260);
+    const pend=d.querySelector('.ed-g[data-id="'+decal.id+'"] .ed-decal-pending');
+    out.pendingShown=!!pend&&pend.style.display!=='none'&&pend.tagName.toLowerCase()==='rect';
+    const pw=parseFloat(pend?.getAttribute('width')||'0'), ph=parseFloat(pend?.getAttribute('height')||'0');
+    out.pendingSizeFinite=Number.isFinite(pw)&&Number.isFinite(ph)&&pw>0&&ph>0;
+    out.noSpikeCells=[...d.querySelectorAll('.ed-g[data-id="'+decal.id+'"] .ed-decal-cell')]
+      .filter(p=>p.style.display!=='none').length===0;
+    out.pendingLabel=/等待重新投射/.test(d.querySelector('.ed-g[data-id="'+decal.id+'"] .ed-decal-label')?.textContent||'');
+    ed.picker.unprojectRect=origUR2;
+    ed.store.update(decal.id,{projector:savedProj});
+    await sleep(220);
+    out.pendingHiddenAfterRestore=!!d.querySelector('.ed-g[data-id="'+decal.id+'"] .ed-decal-pending')
+      &&d.querySelector('.ed-g[data-id="'+decal.id+'"] .ed-decal-pending').style.display==='none';
+
     cam.worldToScreen=origW2S;
     ed.action('tool','select');ed.action('select',null);
     return out;
@@ -1660,6 +1684,10 @@ async function main() {
     `edges=${s25.edgeCount} handles=${s25.handleCount} roles=${s25.handleRoles}`);
   check('投影式贴花不再渲染旧网格 / 单应视频 DOM',
     s25.legacyDomHidden === true && s25.legacyCellsHidden === true);
+  check('无 projector 时退化为屏幕占位框：无网格尖刺、尺寸有限、可恢复',
+    s25.pendingShown === true && s25.pendingSizeFinite === true && s25.noSpikeCells === true &&
+    s25.pendingLabel === true && s25.pendingHiddenAfterRestore === true,
+    `shown=${s25.pendingShown} size=${s25.pendingSizeFinite} noCell=${s25.noSpikeCells} label=${s25.pendingLabel} restore=${s25.pendingHiddenAfterRestore}`);
   check('属性面板提供投射 URL / 不透明度 / 边缘 / 深度（无细分密度）',
     s25.hasUrlInput === true && s25.hasOpacity === true && s25.hasEdge === true &&
     s25.hasDepth === true && s25.noGridInput === true && s25.noLiftInput === true &&
@@ -2183,7 +2211,6 @@ async function main() {
      默认分支仍是「WebGPU=1 / WebGL=0」，断言必须盯住默认分支。 */
   check('pick 快照采样行序按后端区分（uPickFlipY，GLSL+WGSL 双分支）',
     /uPickFlipY/.test(fragGlsl) &&
-    /pickSurfaceDepth\(pickUV\)/.test(fragGlsl) &&
     /select\(1\.0 - uvTL\.y, uvTL\.y, uniform\.uPickFlipY > 0\.5\)/.test(wgslBody) &&
     /mix\(1\.0 - uvTL\.y, uvTL\.y, uPickFlipY\)/.test(fragGlsl) &&
     /\(isWebGPU \? 1 : 0\)/.test(decalSrc) &&
@@ -2233,8 +2260,9 @@ async function main() {
     /decal-degrade-toast/.test(decalSrc));
   /* 「只有包围盒没有视频」的数据层根因：框选横跨远近物体（或深度拾取超时退化
      到碰撞网格）时 OBB 变成几十米巨盒，投射碎片化。必须有跨度/尺寸拦截。 */
-  check('rebuild 拾取超时可放宽（pickTimeout 透传）',
-    /unprojectRect\(a\.rect, 6, 6, \{ pickTimeout: 4000 \}\)/.test(editorSrc) &&
+  check('rebuild 拾取超时可配置（pickTimeout 透传，无头下用较短超时快速退化）',
+    /unprojectRect\(a\.rect, 6, 6, \{ pickTimeout: \d+ \}\)/.test(editorSrc) &&
+    /pickTimeout: 900/.test(editorSrc) &&
     /opt\.pickTimeout/.test(pickingSrc));
   check('贴面巨盒拦截：深度跨度过大拒绝建盒',
     /深度跨度过大/.test(editorSrc) && /spread > 1\.2/.test(editorSrc) && /med > 60/.test(editorSrc));
@@ -2256,8 +2284,9 @@ async function main() {
     !/\.setFromQuat\(/.test(decalSrc));
   check('onPrerender 有异常隔离，贴花报错不会中断 app.render()',
     /function onPrerender\(\)[\s\S]{0,900}?try\s*\{/.test(decalSrc));
-  check('onFrameEnd 请求主帧，覆盖 Picker 离屏 framebuffer',
-    /function onFrameEnd\(\)[\s\S]*?adapter\.requestRender\(\)/.test(decalSrc));
+  check('onFrameEnd 请求主帧，覆盖 Picker 离屏 framebuffer（经节流限频）',
+    /function onFrameEnd\(\)[\s\S]*?requestThrottled\(\)/.test(decalSrc) &&
+    /function requestThrottled\(\)[\s\S]*?adapter\.requestRender\(\)/.test(decalSrc));
   check('onFrameEnd 对 getPickView 做异常隔离',
     /function onFrameEnd\(\)[\s\S]{0,500}?getDepthPickView[\s\S]{0,300}?catch/.test(decalSrc));
   check('无可见贴花时不驱动引擎 Picker',
@@ -2296,27 +2325,47 @@ async function main() {
   const engineDir = path.join(ROOT, 'web', 'engine');
   const hasEngineLayer = fs.existsSync(path.join(engineDir, 'engine-adapter.js')) &&
     fs.existsSync(path.join(engineDir, 'playcanvas-adapter.js'));
-  check('OBB 归一化基准可配（uBoxScale），盒内判定用 |ln|<=1',
+  check('OBB 归一化基准可配（uBoxScale），盒内判定用 |ln|<=1（GLSL 三维 / WGSL 三维）',
     /uniform float uBoxScale/.test(fragGlsl) &&
     /L \/ \(decalHalf \* uBoxScale\)/.test(fragGlsl) &&
     /L \/ \(uniform\.decalHalf \* uniform\.uBoxScale\)/.test(wgslBody) &&
-    /greaterThan\(abs\(ln\.xy\), vec2\(1\.0\)\)/.test(fragGlsl) &&
-    /abs\(ln\.xy\) > vec2f\(1\.0\)/.test(wgslBody));
-  check('UV 映射与盒面基准自洽（uv = ln.xy*0.5+0.5）',
-    /ln\.xy \* 0\.5 \+ 0\.5/.test(fragGlsl) &&
-    /ln\.xy \* 0\.5 \+ vec2f\(0\.5, 0\.5\)/.test(wgslBody) &&
+    /greaterThan\(abs\(ln\), vec3\(1\.0\)\)/.test(fragGlsl) &&
+    /any\(abs\(ln\) > vec3f\(1\.0\)\)/.test(wgslBody));
+  check('UV 映射与盒面基准自洽（u=ln.x*0.5+0.5，v 由 uVideoFlipY 翻转修正行序）',
+    /float vy = ln\.y \* 0\.5 \+ 0\.5/.test(fragGlsl) &&
+    /vec2\(ln\.x \* 0\.5 \+ 0\.5, mix\(vy, 1\.0 - vy, uVideoFlipY\)\)/.test(fragGlsl) &&
+    /let vy = ln\.y \* 0\.5 \+ 0\.5/.test(wgslBody) &&
+    /vec3f\(ln\.x \* 0\.5 \+ 0\.5, vOut, nd\)/.test(wgslBody) &&
+    /mix\(vy, 1\.0 - vy, uniform\.uVideoFlipY\)/.test(wgslBody) &&
     /smoothstep\(1\.0, 1\.0 - decalEdge/.test(fragGlsl) &&
     /smoothstep\(1\.0, 1\.0 - uniform\.decalEdge/.test(wgslBody));
+  check('视频上下颠倒修复默认开启且可回退（videoFlipY=1，注记级覆盖 + 双后端 uniform）',
+    /videoFlipY: 1/.test(decalSrc) &&
+    /inst\.videoFlipY = numOr\(dec\.videoFlipY, options\.videoFlipY\)/.test(decalSrc) &&
+    /'debugMode', 'videoFlipY'/.test(decalSrc) &&
+    /setP\('uVideoFlipY', inst\.videoFlipY\)/.test(decalSrc) &&
+    /uniform float uVideoFlipY/.test(fragGlsl) &&
+    /uniform uVideoFlipY: f32/.test(wgslBody));
   check('深度取值改稳健估计（引擎同族 5×5 邻域 30% 分位）',
     /pickSurfaceDepth/.test(fragGlsl) &&
     /int\(ceil\(float\(n\) \* 0\.3\)\) - 1/.test(fragGlsl) &&
     /i32\(ceil\(f32\(n\) \* 0\.3\)\) - 1/.test(wgslBody) &&
     !/pickMin/.test(fragGlsl + wgslBody));
-  check('深度口径可切换（uDepthMode：引擎同族 / 单 texel 中位兜底）',
+  check('主路径深度口径固定为单 texel（uDepthMode 保留声明兼容，不参与主路径判定）',
     /uniform float uDepthMode/.test(fragGlsl) &&
-    /uDepthMode > 0\.5 \? pickSurfaceDepth/.test(fragGlsl) &&
-    /uniform\.uDepthMode > 0\.5/.test(wgslBody) &&
+    /pickFastDepth\(pickUV\)/.test(fragGlsl) &&
+    /pickFastDepth\(pickUV\)/.test(wgslBody) &&
+    !/uDepthMode > 0\.5[^\n]*pickSurfaceDepth/.test(fragGlsl) &&
     /setP\('uDepthMode'/.test(decalSrc));
+  /* 性能护栏（always-on-top）：主路径只剩「单 texel 重建 + 盒判定」，
+     天然是最低成本，无需 fast/slow 两级粗筛，更无 52 值排序与 select 双求值。
+     弱 GPU 上不再有 TDR 整屏闪烁的慢路径。 */
+  check('贴花性能护栏：主路径无排序/无两级采样/无 select 双求值',
+    /pickFastDepth\(pickUV\)/.test(fragGlsl) &&
+    /pickFastDepth\(pickUV\)/.test(wgslBody) &&
+    !/pickSurfaceDepth\(pickUV\)/.test(fragGlsl) &&
+    !/ndFast/.test(fragGlsl) && !/lnFast/.test(fragGlsl) &&
+    !/select\(\s*pickFastDepth[\s\S]{0,80}pickSurfaceDepth/.test(wgslBody));
   check('调试模式可切换（uDebugMode：深度灰度 / 失败分类着色）',
     /uniform float uDebugMode/.test(fragGlsl) &&
     /setP\('uDebugMode'/.test(decalSrc) &&
@@ -2351,6 +2400,57 @@ async function main() {
     /pickReady/.test(editorSrc));
   check('运行期调参入口存在（setOptions/getOptions）',
     /manager\.setOptions\s*=/.test(decalSrc) && /manager\.getOptions\s*=/.test(decalSrc));
+  /* 整屏闪烁（弱 GPU TDR）紧急熔断：必须能在不改代码/不卸载模块下停掉贴花驱动的
+     永动渲染循环（frameend → requestRender → 下一帧）。三个入口 + 两个帧钩子守卫。
+     历史教训：只隐藏 renderable（setDecalsVisible）不停 requestRender，GPU 仍满载。 */
+  check('整屏闪烁紧急熔断：renderEnabled 三入口 + 帧尾/帧前双钩子守卫',
+    /* ① URL decal=0 与 sessionStorage mg_decal_stop=1 页面加载即熔断 */
+    /decal=0/.test(decalSrc) && /mg_decal_stop/.test(decalSrc) &&
+    /renderEnabled:\s*stoppedByEntry\s*\?\s*0\s*:\s*1/.test(decalSrc) &&
+    /* ② 运行时 setOptions({renderEnabled:0}) 立即生效（含白名单 + renderable 同步） */
+    /'renderEnabled'/.test(decalSrc) &&
+    /setRenderableVisible\(inst\.renderable, !!on\)/.test(decalSrc) &&
+    /* ③ 帧尾钩子熔断：不上传纹理、不 requestRender（断开永动循环） */
+    /if \(!options\.renderEnabled\) return;/.test(decalSrc) &&
+    /* 帧前钩子也熔断：不喂 uniform */
+    (decalSrc.match(/if \(!options\.renderEnabled\) return;/g) || []).length >= 2 &&
+    /* requestRender 必须仍在（视频贴花需要逐帧），只是受熔断控制 */
+    /adapter\.requestRender\(\)/.test(decalSrc));
+  check('帧率节流：requestRender 经 requestThrottled 限频，定时器补帧不断链（防 60fps 永动 TDR）',
+    /maxFps:\s*30/.test(decalSrc) &&
+    /function requestThrottled\(\)/.test(decalSrc) &&
+    /requestThrottled\(\);/.test(decalSrc) &&
+    !/adapter\.requestRender\(\);\s*\n\s*\}\s*\n\s*let prerenderWarned/.test(decalSrc) &&
+    /makeupTimer = setTimeout/.test(decalSrc) &&
+    /if \(makeupTimer\) \{ clearTimeout\(makeupTimer\); makeupTimer = null; \}/.test(decalSrc) &&
+    /'renderEnabled', 'maxFps', 'uploadFps'/.test(decalSrc) &&
+    /maxFps: options\.maxFps/.test(decalSrc));
+  check('纹理上传节流开关存在（uploadFps 默认 0=基线逐帧，可选降载；闪烁真因是 error scope 竞态）',
+    /uploadFps:\s*0/.test(decalSrc) &&
+    /function uploadDue\(\)/.test(decalSrc) &&
+    /let lastTexUpload = 0/.test(decalSrc) &&
+    /if \(uploadDue\(\)\)/.test(decalSrc) &&
+    /if \(!Number\.isFinite\(cap\) \|\| cap <= 0 \|\| cap >= 120\) return true/.test(decalSrc) &&
+    /updateCanvasTexture\(inst\.texture, inst\.blitCanvas\)/.test(decalSrc) &&
+    /uploadFps: options\.uploadFps/.test(decalSrc));
+  check('error scope 竞态修复：异步回调用快照 wasProbeFrame，不再读被重置的 probeDecalsOff（防显示/隐藏交替闪烁）',
+    /const wasProbeFrame = probeDecalsOff/.test(decalSrc) &&
+    /suspicion && wasProbeFrame/.test(decalSrc) &&
+    /if \(wasProbeFrame\)/.test(decalSrc) &&
+    !/if \(suspicion && probeDecalsOff\)/.test(decalSrc) &&
+    !/if \(probeDecalsOff\) \{\s*\/\/ 复测帧/.test(decalSrc) &&
+    /* 引擎持续错误冻结结论：同一 foreign 消息不再复测隐藏（防每两帧闪一次） */
+    /foreignResolvedMsgs\.add\(String\(msg\)\)/.test(decalSrc) &&
+    /foreignResolvedMsgs\.has\(String\(msg\)\)/.test(decalSrc));
+  check('逐帧 error scope 防回归脚本存在（真实异步回调验证不闪烁）',
+    fs.existsSync(path.join(ROOT, 'tools', 'diag_frame_scope.mjs')) &&
+    /可见性切换 <= 1 次/.test(fs.readFileSync(path.join(ROOT, 'tools', 'diag_frame_scope.mjs'), 'utf8')));
+  check('默认恢复无 GPU pass 基线：useShadowPass 默认 0，三段式需显式开启（全屏 quad + always-on-top）',
+    /useShadowPass:/.test(decalSrc) &&
+    /const shadowPathCapable = \[/.test(decalSrc) &&
+    /const shadowPathSupported = shadowPathCapable && !!options\.useShadowPass/.test(decalSrc) &&
+    /const useShadow = shadowPathSupported/.test(decalSrc) &&
+    /'uploadFps', 'useShadowPass'/.test(decalSrc));
   check('引擎适配层就位（engine-adapter + playcanvas-adapter + 解析入口）',
     hasEngineLayer &&
     fs.existsSync(path.join(engineDir, 'index.js')) &&
@@ -2364,9 +2464,9 @@ async function main() {
       /export function createEngineAdapter/.test(adapterSrc) &&
       /export const ADAPTER_CONTRACT/.test(adapterSrc) &&
       /export function validateEngineAdapter/.test(adapterSrc));
-    check('契约方法数 ≥ 30 且分组齐备（6 组）',
-      (adapterSrc.match(/group:\s*'/g) || []).length >= 30 &&
-      ['lifecycle', 'scene', 'material', 'texture', 'geometry', 'picking']
+    check('契约方法数 ≥ 40 且分组齐备（7 组，含 renderpass）',
+      (adapterSrc.match(/group:\s*'/g) || []).length >= 40 &&
+      ['lifecycle', 'scene', 'material', 'texture', 'geometry', 'picking', 'renderpass']
         .every(g => adapterSrc.includes("'" + g + "'")));
     /* 契约层必须是纯接口：注释里可以解释「为什么不用 pc.Mesh」，
        但可执行代码里不得出现任何引擎专有标识。 */
@@ -2511,6 +2611,74 @@ async function main() {
       /hidden2/.test(probeSrc) && /noiseDiff/.test(probeSrc));
   }
 
+  console.log('\n[36] shadowmap 贴花架构守卫（虚拟相机深度图 / 无像素排序）');
+  const engineAdapterSrc = fs.readFileSync(path.join(engineDir, 'engine-adapter.js'), 'utf8');
+  const playCanvasSrc = fs.readFileSync(path.join(engineDir, 'playcanvas-adapter.js'), 'utf8');
+  check('虚拟相机深度图由 projector OBB 构造且可 JSON 持久化',
+    /export function buildShadowDepthMap/.test(schemaSrc) &&
+    /const camOff = half\[2\] \+ margin/.test(schemaSrc) &&
+    /const far = 2 \* half\[2\]/.test(schemaSrc) &&
+    /raycast\(ox, oy, oz, dir\[0\]/.test(schemaSrc) &&
+    /depth: Array\.from\(depth\)/.test(schemaSrc));
+  check('编辑器重建 projector 时生成 shadow 并回传渲染层',
+    /projector\.shadow = buildShadowDepthMap\(projector, raycast, \{ n: 24 \}\)/.test(editorSrc) &&
+    /shadow: a\.projector && a\.projector\.shadow/.test(editorSrc) &&
+    /a\.projector\.shadow && a\.projector\.shadow\.depth/.test(editorSrc));
+  check('shadow 深度纹理走 R32F 数据纹理契约（刷新后仍可上传）',
+    /format: 'r32f'/.test(decalSrc) &&
+    /updateDataTexture\(inst\.shadowTex/.test(decalSrc) &&
+    /ArrayBuffer\.isView\(data\)/.test(decalSrc) &&
+    /Float32Array\.from/.test(decalSrc) &&
+    /createDataTexture/.test(engineAdapterSrc) &&
+    /PIXELFORMAT_R32F/.test(playCanvasSrc));
+  check('shader 主路径为 always-on-top projected decal（单 texel 重建 + 局部盒命中，无跨源深度遮挡）',
+    /void decalProject\(out vec2 uvOut, out float ndOut\)/.test(fragGlsl) &&
+    /fn decalProject\(pickUV: vec2f\) -> vec3f/.test(wgslBody) &&
+    (fragGlsl.match(/decalProject\(uv, nd\)/g) || []).length === 1 &&
+    /let r = decalProject\(pickUV\)/.test(wgslBody) &&
+    // 命中 = projector 局部盒（与主深度同源），UV = ln.xy*0.5+0.5 且 v 翻转修正
+    /vec3 L = \(invProjector \* vec4\(W, 1\.0\)\)\.xyz/.test(fragGlsl) &&
+    /vec3 ln = L \/ \(decalHalf \* uBoxScale\)/.test(fragGlsl) &&
+    /let ln = L \/ \(uniform\.decalHalf \* uniform\.uBoxScale\)/.test(wgslBody) &&
+    /uvOut = vec2\(ln\.x \* 0\.5 \+ 0\.5, mix\(vy, 1\.0 - vy, uVideoFlipY\)\)/.test(fragGlsl) &&
+    /mix\(vy, 1\.0 - vy, uniform\.uVideoFlipY\)/.test(wgslBody));
+  const glslProjectFn = fragGlsl.split('void decalProject')[1]?.split('void main')[0] || '';
+  const wgslProjectFn = wgslBody.split('fn decalProject')[1]?.split('@fragment')[0] || '';
+  check('投影命中热路径成本最低：单 texel 重建，无平滑 / 无排序 / 无 shadow 采样',
+    glslProjectFn.length > 0 && wgslProjectFn.length > 0 &&
+    !/pickSurfaceDepth/.test(glslProjectFn) && !/pickSurfaceDepth/.test(wgslProjectFn) &&
+    !/smoothPickDepth/.test(glslProjectFn) && !/smoothPickDepth/.test(wgslProjectFn) &&
+    !/shadowPcf/.test(glslProjectFn) && !/shadowPcf/.test(wgslProjectFn) &&
+    !/shadowDepth/.test(glslProjectFn) && !/shadowDepth/.test(wgslProjectFn) &&
+    /pickFastDepth\(pickUV\)/.test(glslProjectFn) && /pickFastDepth\(pickUV\)/.test(wgslProjectFn) &&
+    /any\(greaterThan\(abs\(ln\), vec3\(1\.0\)\)\)/.test(glslProjectFn) &&
+    /any\(abs\(ln\) > vec3f\(1\.0\)\)/.test(wgslProjectFn));
+  check('视频始终在前：已彻底删除跨源深度遮挡比较与降噪三件套（防回归）',
+    !/void decalShadow/.test(fragGlsl) && !/fn decalShadow/.test(wgslBody) &&
+    !/float smoothPickDepth/.test(fragGlsl) && !/fn smoothPickDepth/.test(wgslBody) &&
+    !/float shadowPcf/.test(fragGlsl) && !/fn shadowPcf/.test(wgslBody) &&
+    !/shadowWorldNormal/.test(fragGlsl) && !/shadowWorldNormal/.test(wgslBody) &&
+    !/fn decalCov/.test(wgslBody) && !/diffOut/.test(fragGlsl) &&
+    !/texture(Load|Fetch)\(shadowDepth/.test(fragGlsl) &&
+    !/texture(Load|Fetch)\(shadowDepth/.test(wgslBody) &&
+    // alpha 不再乘 cov/soft：视频无条件显示
+    /float a = vid\.a \* decalOpacity \* edge;/.test(fragGlsl) &&
+    /let a = vid\.a \* uniform\.decalOpacity \* edge;/.test(wgslBody));
+  check('已废弃降噪 uniform 只保留声明兼容，不再进入 shadow / alpha 判定',
+    !/uPcf|uNormalCut|uSoftMask/.test(glslProjectFn) &&
+    !/uPcf|uNormalCut|uSoftMask/.test(wgslProjectFn) &&
+    !/uShadowReady|uShadowBias|uVirtualForward/.test(glslProjectFn) &&
+    !/uShadowReady|uShadowBias|uVirtualForward/.test(wgslProjectFn));
+  check('渲染层注入字段仍存在（shadow/调试 uniform 保留声明做兼容）',
+    /setP\('uShadowReady'/.test(decalSrc) &&
+    /setP\('shadowDepth'/.test(decalSrc) &&
+    /setP\('uVirtualCam'/.test(decalSrc) &&
+    /setP\('uVirtualFar'/.test(decalSrc) &&
+    /setP\('uShadowBias'/.test(decalSrc) &&
+    /shadowReady: !!/.test(decalSrc) &&
+    /shadowSize: i\.shadow/.test(decalSrc) &&
+    /shadowHits: i\.shadow/.test(decalSrc));
+
   /* 外部契约：window.__viewer（在 web/app.js 挂载）与 window.__mgEditorBridge
      （web/editor/bridge.js）的字段、方法名与签名本轮不得改动。
      这里做「结构存在性」守卫：本轮未触碰这两个文件，故断言其关键成员仍在。 */
@@ -2523,6 +2691,168 @@ async function main() {
     /mount,\s*unmount,\s*requestExit/.test(bridgeSrc) &&
     /window\.__viewer\s*=\s*viewer/.test(appSrc) &&
     /annotations:\s*global\.settings\.annotations/.test(viewerSrc));
+
+  /* [37] 标准 Shadow-Map Decal 三段式（用户指定方案）：
+     Pass1 GPU depth-only（正交 projector ViewProj → D32_FLOAT）
+     Pass2 主渲染不变
+     Pass3 AABB 立方体光栅化 + 同源 shadow 深度比较 + uvProj 采样视频
+     旧全屏 quad / CPU 深度图路径保留为回退，不作为默认。 */
+  console.log('\n[37] 标准 Shadow-Map Decal 三段式（Pass1/Pass3 GPU 路径）守卫');
+  const shadowShaderSrc = fs.readFileSync(path.join(engineDir, 'decal-shaders.js'), 'utf8');
+  const adapterSrc2 = fs.readFileSync(path.join(engineDir, 'engine-adapter.js'), 'utf8');
+  const pcAdapterSrc2 = fs.readFileSync(path.join(engineDir, 'playcanvas-adapter.js'), 'utf8');
+  const decalSrc2 = fs.readFileSync(path.join(ROOT, 'web', 'editor', 'decal-projection.js'), 'utf8');
+  const viewerSrc2 = fs.readFileSync(path.join(ROOT, 'web', 'viewer', 'index.js'), 'utf8');
+  check('Pass1 depth-only 能力进入引擎契约且 PlayCanvas 有完整实现',
+    ['createDepthPass', 'setDepthPassGeometry', 'setDepthPassProjector',
+      'getDepthPassTexture', 'getDepthPassViewProjection', 'destroyDepthPass',
+      'createSceneNode', 'createMesh', 'destroyMesh']
+      .every(k => adapterSrc2.includes("name: '" + k + "'") &&
+        new RegExp('\\b' + k + '\\s*\\(').test(pcAdapterSrc2)) &&
+    /PIXELFORMAT_DEPTH/.test(pcAdapterSrc2) &&
+    /redWrite = false/.test(pcAdapterSrc2) &&
+    /new P\.RenderTarget/.test(pcAdapterSrc2) &&
+    /PROJECTION_ORTHOGRAPHIC/.test(pcAdapterSrc2));
+  check('渲染 bundle 导出 GPU 深度通道所需的原生类与常量',
+    /Entity, Layer, RenderTarget/.test(viewerSrc2) &&
+    /PIXELFORMAT_DEPTH/.test(viewerSrc2) &&
+    /RENDERTARGET_ORIGIN_NATIVE/.test(viewerSrc2));
+  check('Pass3 VS 输出主相机裁剪坐标 + 投影仪齐次坐标（AABB 立方体）',
+    /export const DECAL_SHADOW_VERTEX_GLSL/.test(shadowShaderSrc) &&
+    /export const DECAL_SHADOW_VERTEX_WGSL/.test(shadowShaderSrc) &&
+    /attribute vec3 vertex_position/.test(shadowShaderSrc) &&
+    /vProj = uProjVP \* world/.test(shadowShaderSrc) &&
+    /gl_Position = matrix_viewProjection \* world/.test(shadowShaderSrc) &&
+    /output\.vProj = uniform\.uProjVP \* world/.test(shadowShaderSrc) &&
+    /projectorCubeGeometry/.test(decalSrc2));
+  check('Pass3 FS 同源深度比较 + depthBias + 4 通道 30% 分位 resolve（GLSL/WGSL 双后端）',
+    /export const DECAL_SHADOW_FRAGMENT_GLSL/.test(shadowShaderSrc) &&
+    /export const DECAL_SHADOW_FRAGMENT_WGSL/.test(shadowShaderSrc) &&
+    /dUV = c\.xy \* 0\.5 \+ 0\.5/.test(shadowShaderSrc) &&
+    /float shadowSurfaceDepth\(vec2 uv\)/.test(shadowShaderSrc) &&
+    /fn shadowSurfaceDepth\(uv: vec2f\)/.test(shadowShaderSrc) &&
+    /float mapD = shadowSurfaceDepth\(dUV\)/.test(shadowShaderSrc) &&
+    /let mapD = shadowSurfaceDepth\(dUV\)/.test(shadowShaderSrc) &&
+    /fragD > mapD \+ uShadowBias/.test(shadowShaderSrc) &&
+    /fragD > mapD \+ uniform\.uShadowBias/.test(shadowShaderSrc) &&
+    /float pickSurfaceDepthShadow\(vec2 puv\)/.test(shadowShaderSrc) &&
+    /fn pickSurfaceDepthShadow\(puv: vec2f\)/.test(shadowShaderSrc));
+  check('Pass3 法线点积剔除：世界法线翻向相机后与 projectorNormal 点积（双后端）',
+    /dot\(nrm, uCameraPos - W\) < 0\.0/.test(shadowShaderSrc) &&
+    /dot\(nrm, projectorNormal\) < uNormalCut/.test(shadowShaderSrc) &&
+    /dot\(nrm, uniform\.uCameraPos - W\) < 0\.0/.test(shadowShaderSrc) &&
+    /dot\(nrm, uniform\.projectorNormal\) < uniform\.uNormalCut/.test(shadowShaderSrc) &&
+    /uniform uNormalCut/.test(shadowShaderSrc) &&
+    /uniform vec3  projectorNormal/.test(shadowShaderSrc));
+  check('默认 always-on-top：uvProj 走 OBB 局部坐标 + vProj.w 判定仅深度比较分支',
+    /vec3 L = \(invProjector \* vec4\(W, 1\.0\)\)\.xyz/.test(shadowShaderSrc) &&
+    /vec3 ln = L \/ \(decalHalf \* uBoxScale\)/.test(shadowShaderSrc) &&
+    /vec2 uvProj = ln\.xy \* 0\.5 \+ 0\.5/.test(shadowShaderSrc) &&
+    /let ln = L \/ \(uniform\.decalHalf \* uniform\.uBoxScale\)/.test(shadowShaderSrc) &&
+    /var uvProj = ln\.xy \* 0\.5 \+ vec2f\(0\.5, 0\.5\)/.test(shadowShaderSrc) &&
+    /if \(uDepthTest > 0\.5\)/.test(shadowShaderSrc));
+  /* 2026-11-20 修订：默认改为 always-on-top（depthTest=0）。取证结论：本构建
+     主画面由自定义高斯渲染器接管，Pass1 的引擎 pick 通道渲不出 splat → 深度图
+     全空 → 深度比较把整块贴花丢光（实测投射 Δ=0）。depthTest=1 保留为可选，
+     仅在引擎自带 splat pick 可用的构建里成立。 */
+  check('默认 always-on-top：depthTest 默认 0、显式可选 1，Pass3 几何与 OBB UV 仍默认启用',
+    /const useShadow = shadowPathSupported/.test(decalSrc2) &&
+    /shadowPathCapable = \[/.test(decalSrc2) &&
+    /const shadowPathSupported = shadowPathCapable && !!options\.useShadowPass/.test(decalSrc2) &&
+    /function syncShadowPass/.test(decalSrc2) &&
+    /depthTest: \(\(\) =>/.test(decalSrc2) &&
+    /shadowPass=0/.test(decalSrc2) &&
+    /depthTest=1/.test(decalSrc2) &&
+    /return 0;/.test(decalSrc2) &&
+    /if \(!options\.depthTest\)/.test(decalSrc2) &&
+    /setP\('invProjector', mp\.inv\)/.test(decalSrc2) &&
+    /setP\('decalHalf', mp\.half\)/.test(decalSrc2) &&
+    /setP\('uDepthTest', canDepthTest \? 1 : 0\)/.test(decalSrc2) &&
+    /setP\('uNormalCut', inst\.normalCut\)/.test(decalSrc2) &&
+    /'videoFlipY', 'depthTest', 'shadowSize'/.test(decalSrc2) &&
+    /if \(inst\.useShadow\) syncShadowPass/.test(decalSrc2));
+  check('碰撞 mesh 深度回退已禁用（D32 与 Pass3 的 RGBA16F 试验口径不兼容）',
+    /与 Pass3 解码口径不兼容/.test(decalSrc2) &&
+    /inst\.collisionFallbackWarned/.test(decalSrc2));
+  check('Pass1 深度源为 3DGS 场景本身（同源）：bundle 暴露正交相机深度入口 + adapter 接入 + 无碰撞 mesh 依赖',
+    /class ProjectorDepthRenderer/.test(viewerSrc2) &&
+    /app\.__mgProjectorDepth = getProjectorDepth/.test(viewerSrc2) &&
+    /PROJECTION_ORTHOGRAPHIC/.test(viewerSrc2) &&
+    /prepareForPicking/.test(viewerSrc2) &&
+    /getProjDepth = app\.__mgProjectorDepth/.test(pcAdapterSrc2) &&
+    /pass\.useGsplat/.test(pcAdapterSrc2) &&
+    /pass\.renderer\.render\(projector, pass\.size\)/.test(pcAdapterSrc2) &&
+    /inst\.depthPass\.useGsplat/.test(decalSrc2) &&
+    /adapter\.setDepthPassProjector\(inst\.depthPass, projector\)/.test(decalSrc2));
+  check('深度方向语义正确：常规深度 fragD>mapD+bias 才 discard（用户 reversed-Z 口径取反会误杀）',
+    /fragD > mapD \+ uShadowBias\) discard;   \/\/ 被遮挡/.test(shadowShaderSrc) &&
+    /reversed-Z/.test(shadowShaderSrc) &&
+    /数值方向相反、语义相同/.test(shadowShaderSrc));
+  check('标准方案 CPU 验证脚本存在且覆盖深度方向与行序',
+    fs.existsSync(path.join(ROOT, 'tools', 'verify_shadow_decal_cpu.mjs')) &&
+    /深度比较方向正确/.test(fs.readFileSync(path.join(ROOT, 'tools', 'verify_shadow_decal_cpu.mjs'), 'utf8')));
+  /* 【TDZ 铁律教训】manager 对象字面量曾直接引用下方才 const 声明的
+     shadowPathSupported，warn 也被 stoppedByEntry 分支提前调用 —— 两次
+     ReferenceError 被 editor.js 的 try/catch 吞成 decalMgr=null，真机「视频
+     完全不投射」。静态正则无法发现 TDZ，只能靠真实执行（runtime 脚本）+ 下面的
+     顺序守卫双保险。 */
+  check('贴花管理器无 TDZ：warn/manager 先初始化，shadowPathSupported 后回填', (() => {
+    const w = decalSrc2.indexOf('const warn =');
+    const u = decalSrc2.indexOf('if (stoppedByEntry) warn(');
+    const m = decalSrc2.indexOf('const manager =');
+    const s = decalSrc2.indexOf('shadowPathSupported: false');
+    const b = decalSrc2.indexOf('manager.shadowPathSupported = shadowPathSupported');
+    return w >= 0 && u > w && m > u && s > m && b > s && s < decalSrc2.indexOf('const shadowPathSupported = ');
+  })());
+  check('贴花运行时链路验证脚本存在（真实执行 createDecalProjection，防 TDZ 回归）',
+    fs.existsSync(path.join(ROOT, 'tools', 'verify_decal_runtime.mjs')) &&
+    /createDecalProjection 不抛 TDZ/.test(
+      fs.readFileSync(path.join(ROOT, 'tools', 'verify_decal_runtime.mjs'), 'utf8')));
+
+  /* [38] 720° 全景导出 UI：面板 / 分辨率选项 / 入口按钮 + 源码守卫。
+     真实取帧功能不走本套件（__viewer 在此被 mock 掉，没有 captureFrame），
+     由 tools/verify_panorama_ui.mjs 在未 mock 的真实 Viewer 上验证。 */
+  console.log('\n[38] 720° 全景导出 UI（按钮 / 分辨率 / 面板 / 源码守卫）');
+  const panoUi = await E(`(()=>{const d=document;
+    const btn=d.getElementById('gsPanoBtn'),p=d.getElementById('gsPanoPanel');
+    const sel=d.getElementById('gsPanoRes');
+    const before=!!p&&!p.hidden;
+    btn?.click();
+    const after=!!p&&!p.hidden;
+    const opts=sel?Array.from(sel.options).map(o=>o.value):[];
+    const pos=d.getElementById('gsPanoPos')?.textContent||'';
+    const status=d.getElementById('gsPanoStatus')?.textContent||'';
+    p?.querySelector('.gs-pano-close')?.click();
+    const consoleText=d.getElementById('gs-console')?.textContent||'';
+    return {btn:!!btn,panel:!!p,before,after,opts,pos,status,
+      consoleEntry:/导出 720° 全景图/.test(consoleText),
+      exportBtn:!!d.getElementById('gsPanoGo')};})()`);
+  check('左下辅助条有「全景图」入口按钮', panoUi.btn === true);
+  check('全景面板挂在页面且默认收起', panoUi.panel === true && panoUi.before === false);
+  check('点击入口展开面板并显示当前机位', panoUi.after === true && /当前机位/.test(panoUi.pos));
+  check('分辨率提供 2048 / 4096 / 8192 三档且默认高清',
+    JSON.stringify(panoUi.opts) === JSON.stringify(['2048', '4096', '8192']) &&
+    /就绪/.test(panoUi.status));
+  check('三维功能控制台内有全景导出入口', panoUi.consoleEntry === true);
+  check('面板有生成并导出按钮', panoUi.exportBtn === true);
+  const panoSrc = fs.readFileSync(path.join(ROOT, 'web', 'viewer', 'panorama.js'), 'utf8');
+  const fusionSrc = fs.readFileSync(path.join(ROOT, 'web', 'maoming-showroom', 'fusion.js'), 'utf8');
+  const panoCssSrc = fs.readFileSync(path.join(ROOT, 'web', 'maoming-showroom', 'fusion.css'), 'utf8');
+  const viewerHtmlSrc = fs.readFileSync(path.join(ROOT, 'web', 'gs-viewer.html'), 'utf8');
+  check('页内六面取帧用 captureFrame（不依赖 preserveDrawingBuffer）',
+    /captureFrame\(\{\s*width:\s*f,\s*height:\s*f,\s*supersample:\s*1\s*\}\)/.test(panoSrc));
+  check('六个方向覆盖完整球面（±X/±Y/±Z），拼接为 2:1',
+    /\[1, 0, 0\], \[-1, 0, 0\], \[0, 1, EPS\], \[0, -1, EPS\], \[0, 0, 1\], \[0, 0, -1\]/.test(panoSrc) &&
+    /const W = f \* 4, H = f \* 2/.test(panoSrc));
+  check('生成后恢复用户原机位（finally 中 setCameraPose）',
+    /savedPose\s*=\s*pose\s*&&/.test(panoSrc) &&
+    /finally\s*\{[\s\S]{0,400}setCameraPose\(savedPose\.position, savedPose\.target, savedPose\.fov\)/.test(panoSrc));
+  check('全景模块已在 viewer 页面加载', /src="\.\/viewer\/panorama\.js"/.test(viewerHtmlSrc));
+  check('父页导出走 Blob/dataURL 下载且显示进度',
+    /api\.generate\(\{\s*face:[\s\S]{0,120}onProgress:\s*mark\s*\}\)/.test(fusionSrc) &&
+    /a\.download\s*=\s*`panorama_/.test(fusionSrc) &&
+    /gsPanoStatus/.test(fusionSrc));
+  check('全景面板样式存在', /#stage \.gs-pano-panel/.test(panoCssSrc));
 
   console.log(`\n========== ${pass} PASS / ${fail} FAIL ==========`);
   return fail;

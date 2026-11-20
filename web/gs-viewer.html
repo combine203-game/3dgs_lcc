@@ -7,8 +7,9 @@
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="./viewer/index.css">
 <link rel="stylesheet" href="./app.css">
-<!-- 标注编辑器样式：仅定义 .ed-* / html.mg-editor-on 规则，浏览态无对应 DOM，
-     不产生任何视觉变化；编辑态由 bridge.js 动态挂载 UI 后生效。 -->
+<!-- 标注编辑器样式：定义 .ed-* / html.mg-editor-on 规则。浏览态只被
+     browse-annotations.js 的只读叠加层复用（.mg-ann-layer，已统一关闭指针事件），
+     编辑态由 bridge.js 动态挂载 UI 后生效。 -->
 <link rel="stylesheet" href="./editor/editor.css">
 <!-- 标注编辑器模块预载：在 HTML 解析期就把整个 editor.js 模块图下载并预编译。
      3DGS 渲染循环会长时间占满主线程，动态 import() 的模块求值要等渲染空窗
@@ -211,10 +212,16 @@
   <div id="mg-error" hidden></div>
 </div>
 <script type="module" src="./app.js"></script>
+<!-- 720° 全景导出：页内六面离屏取帧 + 球面拼接，供展厅页「全景图」按钮调用 -->
+<script type="module" src="./viewer/panorama.js"></script>
 <!-- 标注编辑模块：常驻桥接（仅 2 KB，不触发即不加载编辑器主体）。
      父页 index.html 点「标注编辑」后通过 postMessage 动态 import editor/editor.js，
      浏览态完全零开销、UI 一行不改。 -->
 <script type="module" src="./editor/bridge.js"></script>
+<!-- 浏览态标注层：把编辑器持久化在 localStorage 的标注只读渲染到三维画面上，
+     并向父页 / 自身提供「场景图层」树与逐条显隐控制。进入编辑态（bridge 派发
+     mg-editor-on）时同步卸载，不与编辑器的 Overlay 争同一批 .ed-* DOM。 -->
+<script type="module" src="./browse-annotations.js"></script>
 <!-- 3DGS 数字人集成层：只在 ?human=1 时自动加载，否则只挂一个「数字人」入口按钮。
      模块内部自行等待 window.__viewer 就绪，不改动 app.js / viewer 任何一行。 -->
 <script type="module" src="./human/human-layer.js"></script>

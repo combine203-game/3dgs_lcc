@@ -23,13 +23,14 @@
  *   4. 每个方法都有「不可用时」的确定行为：抛错由调用方捕获，或返回 null，
  *      绝不让调用方因引擎差异而崩。
  *
- * 契约分组（6 组 / 31 方法）：
- *   A. lifecycle  生命周期与渲染上下文   (7)
+ * 契约分组（7 组 / 48 方法）：
+ *   A. lifecycle  生命周期与渲染上下文   (10)
  *   B. scene      场景与相机             (5)
  *   C. material   材质与着色器           (4)
- *   D. texture    纹理与视频             (4)
- *   E. geometry   几何与绘制             (5)
+ *   D. texture    纹理与视频             (6)
+ *   E. geometry   几何与绘制             (8)
  *   F. picking    拾取与数学             (6)
+ *   G. renderpass 深度预通道             (7)   ← Shadow-Map Decal Pass1
  */
 
 export const ENGINE_KINDS = {
@@ -105,6 +106,10 @@ export const ADAPTER_CONTRACT = [
     desc: '取得纹理物理尺寸 [width, height]。' },
   { group: 'texture', name: 'getTextureFormat', params: ['texture'], returns: 'string|null',
     desc: '取得纹理像素格式的引擎无关标识（如 rgba8 / rgba16f），供诊断显示。' },
+  { group: 'texture', name: 'createDataTexture', params: ['options'], returns: 'object|null',
+    desc: '创建一张可由 CPU 数据填充的纹理（用于 shadowmap 深度图）。options = { name, width, height, format:\'r32f\'|\'rgba8\', filter:\'nearest\'|\'linear\' }。' },
+  { group: 'texture', name: 'updateDataTexture', params: ['texture', 'data'], returns: 'void',
+    desc: '用 Float32Array/Uint8Array 填充数据纹理（尺寸须与创建时一致）。' },
   { group: 'texture', name: 'destroyTexture', params: ['texture'], returns: 'void',
     desc: '销毁纹理句柄。' },
 
@@ -119,6 +124,12 @@ export const ADAPTER_CONTRACT = [
     desc: '把可渲染实例移出绘制层并销毁。' },
   { group: 'geometry', name: 'setRenderableVisible', params: ['renderable', 'visible'], returns: 'void',
     desc: '设置可渲染实例的可见性。' },
+  { group: 'geometry', name: 'createSceneNode', params: ['name'], returns: 'object|null',
+    desc: '创建一个独立场景节点句柄（用于给网格实例提供独立世界变换）。' },
+  { group: 'geometry', name: 'createMesh', params: ['positions', 'indices', 'componentCount'], returns: 'object|null',
+    desc: '由顶点/索引数组创建三角网格。positions 为 Float32Array，componentCount 为每顶点分量数（2 或 3，必须与 shader attribute 一致）。' },
+  { group: 'geometry', name: 'destroyMesh', params: ['mesh'], returns: 'void',
+    desc: '销毁 createMesh 创建的网格句柄。' },
 
   // ---- F. 拾取与数学 (6) ----
   { group: 'picking', name: 'getDepthPickView', params: [], returns: 'object|null',
@@ -132,7 +143,23 @@ export const ADAPTER_CONTRACT = [
   { group: 'picking', name: 'invertMatrix', params: ['matrix'], returns: 'Float32Array|null',
     desc: '求 4×4 矩阵逆，返回同约定的列主序 Float32Array(16)；奇异矩阵返回 null。' },
   { group: 'picking', name: 'rotateVectorByQuaternion', params: ['vector', 'quaternion'], returns: 'number[]',
-    desc: '用四元数旋转向量，返回 [x,y,z]（世界坐标方向，例如投影机本地 +Z 的世界方向）。' }
+    desc: '用四元数旋转向量，返回 [x,y,z]（世界坐标方向，例如投影机本地 +Z 的世界方向）。' },
+
+  // ---- G. 深度预通道 (7)：Shadow-Map Decal 的 Pass1 ----
+  { group: 'renderpass', name: 'createDepthPass', params: ['options'], returns: 'object|null',
+    desc: '创建 depth-only 渲染通道：正交相机 + D32_FLOAT 深度纹理 + 独立绘制层。options={size:[w,h], name}。返回不透明句柄。' },
+  { group: 'renderpass', name: 'setDepthPassGeometry', params: ['pass', 'triangles'], returns: 'boolean',
+    desc: '填充通道要渲染的不透明几何。triangles={positions:Float32Array, indices:Uint32Array|Uint16Array}（世界坐标，flat 三角形）。' },
+  { group: 'renderpass', name: 'setDepthPassProjector', params: ['pass', 'projector'], returns: 'boolean',
+    desc: '设置正交投影仪 {position,quaternion,half,near,far}；相机放到 OBB 背面朝 +Z 看，只渲染一次。' },
+  { group: 'renderpass', name: 'setDepthPassEnabled', params: ['pass', 'enabled'], returns: 'void',
+    desc: '启用/停用通道相机。停用后深度纹理内容保留，供 Pass3 采样。' },
+  { group: 'renderpass', name: 'getDepthPassTexture', params: ['pass'], returns: 'object|null',
+    desc: '取得通道的深度纹理句柄（可直接喂给材质的 sampler uniform）。' },
+  { group: 'renderpass', name: 'getDepthPassViewProjection', params: ['pass'], returns: 'Float32Array|null',
+    desc: '取得投影仪正交相机 ViewProj，列主序 + 列向量约定，供 Pass3 VS/FS 使用。' },
+  { group: 'renderpass', name: 'destroyDepthPass', params: ['pass'], returns: 'void',
+    desc: '销毁通道的相机实体、绘制层、深度纹理与网格。' }
 ];
 
 /** 契约分组（用于文档与断言） */
@@ -142,7 +169,8 @@ export const ADAPTER_GROUPS = {
   material: '材质与着色器',
   texture: '纹理与视频',
   geometry: '几何与绘制',
-  picking: '拾取与数学'
+  picking: '拾取与数学',
+  renderpass: '深度预通道'
 };
 
 /**

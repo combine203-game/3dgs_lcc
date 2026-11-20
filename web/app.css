@@ -217,6 +217,19 @@ body.mg-video #mg-stage{position:fixed;inset:0}
   .mg-mm-hd button{padding:3px 4px}
 }
 
+/* ===== 浏览态标注层（browse-annotations.js） =====
+   复用编辑器 Overlay 的 .ed-* 结构只为还原同一套视觉效果；浏览态是**只读**的：
+   整层与全部后代一律关闭指针事件，绝不抢走引擎的旋转 / 平移 / 滚轮 / 漫游手势，
+   也不会因为点到展板而误触发选中。显隐由「场景图层」面板控制。 */
+.mg-ann-layer,
+.mg-ann-layer * {
+  pointer-events: none !important;
+}
+.mg-ann-layer .ed-item,
+.mg-ann-layer .ed-g {
+  cursor: default;
+}
+
 /* ===== 展厅融合页（maoming-showroom）内嵌：只保留纯三维画面 ===== */
 /* 顶栏、浮层与小地图由父页面接管；DOM 仍保留，按钮可被父页面 click 触发 */
 .mg-bare #mg-bar,.mg-bare #mg-minimap,.mg-bare #mg-helpbox,

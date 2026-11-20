@@ -39,7 +39,11 @@ export const MEDIA_TYPES = [
 function pickMediaHtml(m, a) {
   if (!m) {
     if (a?.kind === 'screen') return '<div class="ed-pick-none">三维实体屏 · 播放内置演示画面（可在下方填入视频 URL）</div>';
-    if (a?.kind === 'decal') return '<div class="ed-pick-none">贴面矩形 · 投影式延迟贴花（填入视频 URL 后即为投射面）</div>';
+    if (a?.kind === 'decal') {
+      return a.projector?.mode === 'persp'
+        ? '<div class="ed-pick-none">透视贴花 · 视锥体透视投影（填入视频 URL 后即为投射面）</div>'
+        : '<div class="ed-pick-none">贴面矩形 · 投影式延迟贴花（填入视频 URL 后即为投射面）</div>';
+    }
     return '<div class="ed-pick-none">纯文字标注 · 无媒体内容</div>';
   }
   const url = m.url || '';
@@ -246,10 +250,13 @@ export function createPanel({ host, store, onAction, getState, getDecalDiag }) {
       return;
     }
     // 动线样式 / 实体屏朝向 / 贴花投射参数：输入时实时预览，不必等失焦
-    if (['bandWidth', 'flowSpeed', 'yaw', 'pitch', 'decalOpacity', 'decalEdge', 'decalDepth'].includes(t.dataset?.field)) {
+    if (['bandWidth', 'flowSpeed', 'yaw', 'pitch', 'decalOpacity', 'decalEdge', 'decalDepth',
+      // 透视贴花视锥体参数：FOV / 宽高比 / 远距 / 近距
+      'projFov', 'projAspect', 'projFar', 'projNear'].includes(t.dataset?.field)) {
       const f = t.dataset.field, v = Number(t.value);
       const positive = f === 'bandWidth' || f === 'flowSpeed';
-      const min = { decalOpacity: 0.2, decalEdge: 0, decalDepth: 0.1 }[f] ?? 0;
+      const min = { decalOpacity: 0.2, decalEdge: 0, decalDepth: 0.1,
+        projFov: 10, projAspect: 0.2, projFar: 0.3, projNear: 0.02 }[f] ?? 0;
       if (Number.isFinite(v) && v >= min && (!positive || v > 0))
         onAction('property', { id: getState().selectedId, field: f, val: v }, true);
       return;
@@ -412,10 +419,26 @@ export function createPanel({ host, store, onAction, getState, getDecalDiag }) {
       <label class="ed-chk"><input type="checkbox" data-field="flowArrow" ${a.style.flowArrow !== false ? 'checked' : ''}> 箭头指向（关闭则为等宽条带）</label>
       <div class="ed-prop-hint">中心线按 0.45 m 等距重采样并逐点吸附到碰撞 MESH 表面，<b>贴合模型起伏、不悬空</b>；动线本身是一串<b>带箭头尖的等宽多边形</b>（不是底带里塞小箭头），宽度在屏幕上全程一致，箭头整串沿路径流动。绘制中即实时预览箭头链，双击结束后回到「选择」。</div>` : '';
     const proj = a.projector;
-    const obbStatus = proj
-      ? `投影机 OBB：${(proj.half[0] * 2).toFixed(2)} m × ${(proj.half[1] * 2).toFixed(2)} m × ${(proj.half[2] * 2).toFixed(2)} m（深度反算表面）`
-      : '尚未生成投影机（等待相机 / 深度就绪，或点下方按钮重建）';
-    const decalBlock = a.kind === 'decal' ? `
+    /* 投影机两种工作模式：ortho = 正交 OBB（贴面矩形），persp = 透视视锥体（透视贴花）。
+       二者数据同构（position / quaternion / half），只有参数语义不同，
+       所以面板只在「参数区」分叉，其余（视频源 / 不透明度 / 诊断）完全共用。 */
+    const isPersp = !!(proj && proj.mode === 'persp');
+    const obbStatus = projectorStatusText(proj);
+    const kindLabel = isPersp ? '透视贴花' : KINDS[a.kind].label;
+    const decalProjBlock = isPersp ? `
+      <div class="ed-sec-hd"><b>透视贴花 · 视锥体投射</b><small>透视投影 · 光心布设</small></div>
+      <label>投射视频地址<input data-media-field="url" value="${esc(mUrl)}" placeholder="留空播放内置演示画面；支持 mp4 / webm URL"></label>
+      <div class="ed-prop-hint">两次点击布设视锥体：<b>第 1 点 = 光心</b>，<b>第 2 点 = 光轴指向</b>。贴花以<b>透视投影</b>从光心投射到场景表面（近大远小），深度预通道（Pass1）同样由透视相机渲染。拖动视锥中心手柄平移光心，±X / ±Y 手柄改视场，+Z 手柄改远距。</div>
+      <div class="ed-prop-status" data-role="decal-obb-status">${obbStatus}</div>
+      <div class="ed-sec-hd"><b>视锥参数</b><small>FOV / 宽高比 / 远近</small></div>
+      <label>竖直 FOV（度）<input type="range" min="10" max="120" step="1" data-field="projFov" value="${esc(Number(proj.fov ?? 45).toFixed(0))}"></label>
+      <label>宽高比<input type="number" min="0.2" max="6" step="0.05" data-field="projAspect" value="${esc(Number(proj.aspect ?? 16 / 9).toFixed(2))}"></label>
+      <label>远距（米）<input type="number" min="0.3" max="120" step="0.1" data-field="projFar" value="${esc(Number(proj.far ?? proj.half[2]).toFixed(2))}"></label>
+      <label>近距（米）<input type="number" min="0.02" max="20" step="0.02" data-field="projNear" value="${esc(Number(proj.near ?? 0.05).toFixed(2))}"></label>
+      <div class="ed-prop-hint">FOV 与远距共同决定远平面尺寸（半高 = 远距 × tan(FOV/2)），任何一项改动都会重算视锥体，线框与投射立即同步；近距只裁掉光心附近像素。</div>
+      <div class="ed-sec-hd"><b>投射参数</b><small>不透明度 / 边缘</small></div>
+      <label>不透明度<input type="range" min="0.2" max="1" step="0.05" data-field="decalOpacity" value="${esc(a.style.decalOpacity ?? 0.9)}"></label>
+      <label>边缘软过渡<input type="range" min="0" max="0.5" step="0.01" data-field="decalEdge" value="${esc(a.style.decalEdge ?? 0.12)}"></label>` : `
       <div class="ed-sec-hd"><b>贴面矩形 · 投影式延迟贴花</b><small>GPU 逐像素贴合表面</small></div>
       <label>投射视频地址<input data-media-field="url" value="${esc(mUrl)}" placeholder="留空播放内置演示画面；支持 mp4 / webm URL"></label>
       <div class="ed-prop-hint">屏幕框选两对角后，引擎按当前画面逐像素读取深度、反投影到世界坐标，重建「投影机 OBB」。贴花在 GPU 后处理阶段逐像素投射到<b>真实渲染表面</b>——像素级贴合、不重构网格。选中后拖动 OBB 中心可平移、拖动六向手柄可缩放。</div>
@@ -425,7 +448,8 @@ export function createPanel({ host, store, onAction, getState, getDecalDiag }) {
       <label>不透明度<input type="range" min="0.2" max="1" step="0.05" data-field="decalOpacity" value="${esc(a.style.decalOpacity ?? 0.9)}"></label>
       <label>边缘软过渡<input type="range" min="0" max="0.5" step="0.01" data-field="decalEdge" value="${esc(a.style.decalEdge ?? 0.12)}"></label>
       <label>投射深度（米）<input type="number" min="0.1" max="4" step="0.05" data-field="decalDepth" value="${esc(a.style.decalDepth ?? 0.5)}"></label>
-      <div class="ed-prop-hint">「投射深度」只改投影机盒厚（沿法向的容纳范围），不重采表面；调大可容纳更厚的模型起伏，调小让贴花贴得更紧。</div>
+      <div class="ed-prop-hint">「投射深度」只改投影机盒厚（沿法向的容纳范围），不重采表面；调大可容纳更厚的模型起伏，调小让贴花贴得更紧。</div>`;
+    const decalBlock = a.kind === 'decal' ? `${decalProjBlock}
       <div class="ed-sec-hd"><b>投射诊断</b><small>归一化 / 深度口径 / 分辨率</small></div>
       <label class="ed-chk" title="按深度差分重建表面法向剔除背面。掠射角法向仍有噪声，开启会在贴花上打出斑驳空洞，故默认关闭"><input type="checkbox" data-field="decalCull" ${a.style.decalCull ? 'checked' : ''}> 背面剔除</label>
       <label>归一化基准<select data-field="decalBoxScale">
@@ -437,9 +461,9 @@ export function createPanel({ host, store, onAction, getState, getDecalDiag }) {
         <option value="0" ${Number(a.style.decalDepthMode ?? 1) === 0 ? 'selected' : ''}>单 texel 中位（性能兜底）</option>
       </select></label>
       <div class="ed-prop-status" data-role="decal-diag-status">贴花诊断：等待运行时数据…</div>
-      <div class="ed-prop-hint">「归一化基准」=1 表示 OBB 盒面即贴花边界（整框命中）；=0.5 复现历史行为（每轴只命中内侧 1/4，表现为框线清楚、框内只有中间一小块）。「深度采样口径」决定如何从引擎深度快照取值：引擎同族口径与引擎拾取结果一致，推荐保持默认。</div>` : '';
+      <div class="ed-prop-hint">「归一化基准」=1 表示投影机边界即贴花边界（整框命中）；=0.5 复现历史行为（每轴只命中内侧 1/4，表现为框线清楚、框内只有中间一小块）。「深度采样口径」决定如何从引擎深度快照取值：引擎同族口径与引擎拾取结果一致，推荐保持默认。</div>` : '';
     return `
-      <div class="ed-sec-hd"><b>属性</b><small>${KINDS[a.kind].label}</small></div>
+      <div class="ed-sec-hd"><b>属性</b><small>${kindLabel}</small></div>
       ${pickViewHtml(a)}
       <label>标题<input data-field="title" value="${esc(a.title)}"></label>
       <label>说明<textarea data-field="body" rows="4">${esc(a.body)}</textarea></label>
@@ -470,6 +494,19 @@ export function createPanel({ host, store, onAction, getState, getDecalDiag }) {
         ${a.kind === 'board' ? `<button data-act="anchor-reset" data-v="${a.id}">复位引线锚点</button>` : ''}
         <button data-act="delete" data-v="${a.id}" class="ed-danger">删除</button>
       </div>`;
+  }
+
+  /** 投影机状态行文案（ortho = OBB 盒尺寸，persp = 视锥体参数）。
+   *  首屏渲染与 syncProps 共用同一口径，避免拖拽 / 改参后文案退回 OBB。 */
+  function projectorStatusText(proj) {
+    if (!proj) return '尚未生成投影机（等待相机 / 深度就绪，或点下方按钮重建）';
+    if (proj.mode === 'persp') {
+      return `透视视锥体：FOV ${Number(proj.fov ?? 45).toFixed(0)}° · ` +
+        `宽高比 ${Number(proj.aspect ?? 16 / 9).toFixed(2)} · ` +
+        `近 ${Number(proj.near ?? 0).toFixed(2)} m / 远 ${Number(proj.far ?? proj.half[2]).toFixed(2)} m（光心布设）`;
+    }
+    return `投影机 OBB：${(proj.half[0] * 2).toFixed(2)} m × ${(proj.half[1] * 2).toFixed(2)} m × ` +
+      `${(proj.half[2] * 2).toFixed(2)} m（深度反算表面）`;
   }
 
   /** 只同步控件数值，不重建 DOM —— 输入时不失焦 */
@@ -505,10 +542,11 @@ export function createPanel({ host, store, onAction, getState, getDecalDiag }) {
       else if (f === 'decalBoxScale') { const v = String(a.style.decalBoxScale ?? 1); if (el.value !== v) el.value = v; }
       else if (f === 'decalDepthMode') { const v = String(a.style.decalDepthMode ?? 1); if (el.value !== v) el.value = v; }
     });
-    // 贴花 OBB 尺寸随拖拽 / 重建实时刷新，不重建整块属性面板
+    // 贴花 / 视锥体状态行随拖拽 / 重建 / 改参实时刷新，不重建整块属性面板
     const obbStatus = propEl.querySelector('[data-role="decal-obb-status"]');
     if (obbStatus && a.projector) {
-      obbStatus.textContent = `投影机 OBB：${(a.projector.half[0] * 2).toFixed(2)} m × ${(a.projector.half[1] * 2).toFixed(2)} m × ${(a.projector.half[2] * 2).toFixed(2)} m（深度反算表面）`;
+      const txt = projectorStatusText(a.projector);
+      if (obbStatus.textContent !== txt) obbStatus.textContent = txt;
     }
     // 贴花诊断状态行：只读展示渲染层运行时参数（不重建面板，避免打断输入）
     const diagEl = propEl.querySelector('[data-role="decal-diag-status"]');

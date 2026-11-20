@@ -26,6 +26,23 @@ export function createPlayCanvasAdapter({ getApp, getCameraEntity, getPickView }
   const app = getApp ? getApp() : null;
   const device = app && app.graphicsDevice ? app.graphicsDevice : null;
 
+  /* Pass1 深度相机默认关闭（静态场景只需在 projector 变化时渲一次），
+     渲染完成的下一帧由这里关掉，避免每帧重画碰撞 mesh 把 GPU 拖垮。 */
+  const pendingDepthPasses = new Set();
+  if (app && typeof app.on === 'function') {
+    app.on('frameend', () => {
+      for (const pass of pendingDepthPasses) {
+        pass.framesLeft--;
+        if (pass.framesLeft <= 0) {
+          try { pass.camera.camera.enabled = false; } catch (_) { /* noop */ }
+          pendingDepthPasses.delete(pass);
+          // 主画面必须在 Pass1 之后重绘一次，否则编辑态留在离屏 RT 上（黑屏）
+          app.renderNextFrame = true;
+        }
+      }
+    });
+  }
+
   const adapter = {
     // ---- A. 生命周期与渲染上下文 ----
     getEngineKind() { return ENGINE_KINDS.PLAYCANVAS; },
@@ -219,7 +236,39 @@ export function createPlayCanvasAdapter({ getApp, getCameraEntity, getPickView }
       if (fmt === P.PIXELFORMAT_RGBA16F) return 'rgba16f';
       if (fmt === P.PIXELFORMAT_RGBA32F) return 'rgba32f';
       if (fmt === P.PIXELFORMAT_RGBA8) return 'rgba8';
+      if (P.PIXELFORMAT_R32F !== undefined && fmt === P.PIXELFORMAT_R32F) return 'r32f';
       return 'unknown';
+    },
+
+    /* CPU 数据纹理：shadowmap 深度图用 R32F，逐纹素写一个归一化深度。
+       PlayCanvas 的标准更新路径是 texture.lock().set(typedArray) + unlock()，
+       引擎自身的灯光/聚簇纹理（index.js 23410/23634）正是这么做的。 */
+    createDataTexture(options = {}) {
+      if (!P || !P.Texture) return null;
+      const fmtMap = { r32f: P.PIXELFORMAT_R32F, rgba8: P.PIXELFORMAT_RGBA8 };
+      const fmt = fmtMap[options.format] != null ? fmtMap[options.format] : P.PIXELFORMAT_R32F;
+      const filterMap = { nearest: P.FILTER_NEAREST, linear: P.FILTER_LINEAR };
+      const flt = filterMap[options.filter] != null ? filterMap[options.filter] : P.FILTER_NEAREST;
+      const tex = new P.Texture(device, {
+        name: options.name || 'decal-data-texture',
+        width: Math.max(1, options.width || 1),
+        height: Math.max(1, options.height || 1),
+        format: fmt,
+        mipmaps: false,
+        minFilter: flt, magFilter: flt,
+        addressU: P.ADDRESS_CLAMP_TO_EDGE,
+        addressV: P.ADDRESS_CLAMP_TO_EDGE
+      });
+      return tex;
+    },
+
+    updateDataTexture(texture, data) {
+      if (!texture || !data) return;
+      try {
+        const dst = texture.lock();
+        dst.set(data);
+        texture.unlock();
+      } catch (_) { /* noop */ }
     },
 
     destroyTexture(texture) {
@@ -278,6 +327,27 @@ export function createPlayCanvasAdapter({ getApp, getCameraEntity, getPickView }
       renderable.visible = !!visible;
     },
 
+    createSceneNode(name) {
+      if (!P || !P.GraphNode) return null;
+      return new P.GraphNode(name || 'DecalNode');
+    },
+
+    createMesh(positions, indices, componentCount) {
+      if (!P || !P.Mesh || !positions) return null;
+      try {
+        const mesh = new P.Mesh(device);
+        mesh.setPositions(positions, componentCount || 3);
+        if (indices) mesh.setIndices(indices);
+        mesh.update(P.PRIMITIVE_TRIANGLES);
+        return mesh;
+      } catch (_) { return null; }
+    },
+
+    destroyMesh(mesh) {
+      if (!mesh) return;
+      try { mesh.destroy(); } catch (_) { /* noop */ }
+    },
+
     // ---- F. 拾取与数学 ----
     getDepthPickView() {
       if (!getPickView) return null;
@@ -333,6 +403,238 @@ export function createPlayCanvasAdapter({ getApp, getCameraEntity, getPickView }
       const out = new P.Vec3();
       q.transformVector(new P.Vec3(vector[0], vector[1], vector[2]), out);
       return [out.x, out.y, out.z];
+    },
+
+    // ---- G. 深度预通道（Shadow-Map Decal Pass1）----
+    // 规格要求：从虚拟正交相机渲染「场景本身」到深度纹理。优先走 bundle 暴露的
+    // 3DGS 深度入口（同源，消除跨源椒盐）；不可用时回退到碰撞 mesh depth-only pass。
+    createDepthPass(options = {}) {
+      if (!app || !device) return null;
+      const size = Array.isArray(options.size) ? options.size : [256, 256];
+      const w = Math.max(4, Math.floor(size[0]));
+      const h = Math.max(4, Math.floor(size[1]));
+      const name = options.name || 'decal-shadow';
+      const getProjDepth = app.__mgProjectorDepth;
+      if (typeof getProjDepth === 'function') {
+        try {
+          const rd = getProjDepth();
+          if (rd) {
+            return {
+              useGsplat: true, renderer: rd, size: w,
+              texture: null, projVP: null, projector: null
+            };
+          }
+        } catch (e) {
+          console.warn('[decal-depth-pass] 3DGS 深度入口不可用，回退碰撞 mesh：' +
+            (e && e.message || e));
+        }
+      }
+      if (!P || !P.RenderTarget || !P.Entity || !P.Layer) return null;
+      try {
+        /* D32_FLOAT 深度纹理：PIXELFORMAT_DEPTH 在 WebGL2 = DEPTH_COMPONENT32F，
+           WebGPU = depth32float（PlayCanvas 2.23.3 源码确认）。只有 depthBuffer、
+           没有 colorBuffer → 合法 depth-only RenderTarget。 */
+        const texture = new P.Texture(device, {
+          name: name + '-depth', width: w, height: h,
+          format: P.PIXELFORMAT_DEPTH, mipmaps: false,
+          minFilter: P.FILTER_NEAREST, magFilter: P.FILTER_NEAREST,
+          addressU: P.ADDRESS_CLAMP_TO_EDGE, addressV: P.ADDRESS_CLAMP_TO_EDGE
+        });
+        const target = new P.RenderTarget({
+          depthBuffer: texture, samples: 1,
+          origin: P.RENDERTARGET_ORIGIN_NATIVE, autoResolve: false
+        });
+        const layer = new P.Layer({
+          name: name + '-layer', clearColorBuffer: false, clearDepthBuffer: true
+        });
+        app.scene.layers.push(layer);
+
+        /* 颜色写掩码全关 + 深度测试/写入开 = depth-only pass（与引擎阴影 pass 同范式）。 */
+        const material = new P.StandardMaterial();
+        material.redWrite = false; material.greenWrite = false;
+        material.blueWrite = false; material.alphaWrite = false;
+        material.depthTest = true; material.depthWrite = true;
+        material.cull = P.CULLFACE_NONE;
+        material.update();
+
+        const node = new P.GraphNode(name + '-geo');
+        const camera = new P.Entity(name + '-cam', app);
+        camera.addComponent('camera', {
+          projection: P.PROJECTION_ORTHOGRAPHIC,
+          nearClip: 0.01, farClip: 100,
+          orthoHeight: 1, aspectRatio: 1,
+          clearColorBuffer: false, clearDepthBuffer: true,
+          renderTarget: target,
+          priority: -100,
+          layers: [layer.id]
+        });
+        app.root.addChild(camera);
+        // 默认关闭：静态场景只在 projector 变化后渲一次，避免每帧重画碰撞 mesh
+        camera.camera.enabled = false;
+
+        return {
+          texture, target, layer, material, node, camera,
+          mesh: null, meshInstance: null, framesLeft: 0, projector: null
+        };
+      } catch (e) {
+        console.warn('[decal-depth-pass] 创建失败：' + (e && e.message || e));
+        return null;
+      }
+    },
+
+    setDepthPassGeometry(pass, triangles) {
+      if (!pass || !triangles || !P || !P.MeshInstance) return false;
+      if (pass.useGsplat) {
+        // 3DGS 深度源不需要碰撞 mesh：场景本身就是被渲染对象。
+        pass.geometryReady = true;
+        return true;
+      }
+      try {
+        if (pass.meshInstance) {
+          pass.layer.removeMeshInstances([pass.meshInstance], false);
+          pass.meshInstance.destroy();
+          pass.meshInstance = null;
+        }
+        if (pass.mesh) { pass.mesh.destroy(); pass.mesh = null; }
+        const positions = triangles.positions;
+        const indices = triangles.indices;
+        if (!positions || !positions.length) return false;
+        const mesh = new P.Mesh(device);
+        mesh.setPositions(positions, 3);
+        if (indices && indices.length) mesh.setIndices(indices);
+        mesh.update(P.PRIMITIVE_TRIANGLES);
+        const mi = new P.MeshInstance(mesh, pass.material, pass.node);
+        mi.castShadow = false; mi.receiveShadow = false; mi.pick = false;
+        mi.cull = false; mi.visible = true;
+        pass.layer.addMeshInstances([mi], false);   // 不透明列表：depth-only pass
+        pass.mesh = mesh; pass.meshInstance = mi;
+        // 几何变了但相机没变也要重渲一次
+        if (pass.projector) adapter.setDepthPassProjector(pass, pass.projector);
+        return true;
+      } catch (e) {
+        console.warn('[decal-depth-pass] 几何更新失败：' + (e && e.message || e));
+        return false;
+      }
+    },
+
+    setDepthPassProjector(pass, projector) {
+      if (!pass || !projector || !Array.isArray(projector.position) ||
+          !Array.isArray(projector.quaternion) || !Array.isArray(projector.half)) return false;
+      if (pass.useGsplat) {
+        // 同步渲染一次：正交投影仪相机 -> 3DGS 深度纹理。静态场景只在 projector
+        // 变化时渲染，热路径无额外开销。
+        try {
+          const res = pass.renderer.render(projector, pass.size);
+          if (!res) return false;
+          pass.texture = res.texture;
+          pass.projVP = res.viewProj;
+          pass.projector = projector;
+          pass.framesLeft = 0; // 不需要 frameend 关相机（renderer 内部自己关）
+          return true;
+        } catch (e) {
+          console.warn('[decal-depth-pass] 3DGS 深度渲染失败：' + (e && e.message || e));
+          return false;
+        }
+      }
+      try {
+        const cam = pass.camera.camera;
+        const pos = projector.position;
+        const q = projector.quaternion;
+        const half = projector.half;
+        const nrm = adapter.rotateVectorByQuaternion([0, 0, 1], q);
+        const up = adapter.rotateVectorByQuaternion([0, 1, 0], q);
+        const margin = 1.0;
+        const isPersp = projector.mode === 'persp';
+        /* 两种视锥：
+           · ortho：相机退到 OBB 背面（局部 -Z 一侧），正交视锥 = OBB 的 XY 范围；
+           · persp：position 即光心，相机站在光心沿 +Z 看出去，竖直 fov 由
+             「远平面半高 / 远距」反推，near/far 直接取 projector 的值。
+           切换模式时两个模式的属性都要显式写一遍，避免上一次的模式残留。 */
+        const nf = Math.max(0.02, Number(projector.near) || half[2] * 0.02);
+        const ff = Math.max(nf + 0.05, Number(projector.far) || half[2]);
+        const eye = isPersp
+          ? new P.Vec3(pos[0], pos[1], pos[2])
+          : new P.Vec3(
+            pos[0] - nrm[0] * (half[2] + margin),
+            pos[1] - nrm[1] * (half[2] + margin),
+            pos[2] - nrm[2] * (half[2] + margin));
+        const target = new P.Vec3(
+          pos[0] + nrm[0] * (isPersp ? ff : half[2]),
+          pos[1] + nrm[1] * (isPersp ? ff : half[2]),
+          pos[2] + nrm[2] * (isPersp ? ff : half[2])
+        );
+        pass.camera.setPosition(eye);
+        pass.camera.lookAt(target, new P.Vec3(up[0], up[1], up[2]));
+        cam.projection = isPersp ? P.PROJECTION_PERSPECTIVE : P.PROJECTION_ORTHOGRAPHIC;
+        cam.aspectRatio = Math.max(0.05, half[0] / Math.max(0.05, half[1]));
+        if (isPersp) {
+          cam.fov = Math.min(150, Math.max(2,
+            2 * Math.atan2(Math.max(1e-4, half[1]), ff) * 180 / Math.PI));
+          cam.nearClip = nf;
+          cam.farClip = ff;
+        } else {
+          cam.orthoHeight = Math.max(0.05, half[1]);
+          cam.nearClip = 0.01;
+          cam.farClip = 2 * half[2] + 2 * margin + 2;
+        }
+        pass.projector = projector;
+        cam.enabled = true;
+        pass.framesLeft = 1;
+        pendingDepthPasses.add(pass);
+        app.renderNextFrame = true;
+        return true;
+      } catch (e) {
+        console.warn('[decal-depth-pass] 投影仪更新失败：' + (e && e.message || e));
+        return false;
+      }
+    },
+
+    setDepthPassEnabled(pass, enabled) {
+      if (!pass) return;
+      if (pass.useGsplat) return; // 3DGS 深度源是同步渲染的，无相机常驻开关
+      if (!pass.camera) return;
+      try {
+        pass.camera.camera.enabled = !!enabled;
+        if (enabled) {
+          pass.framesLeft = 1;
+          pendingDepthPasses.add(pass);
+          app.renderNextFrame = true;
+        } else {
+          pendingDepthPasses.delete(pass);
+        }
+      } catch (_) { /* noop */ }
+    },
+
+    getDepthPassTexture(pass) { return pass ? pass.texture : null; },
+
+    getDepthPassViewProjection(pass) {
+      if (!pass) return null;
+      if (pass.useGsplat) return pass.projVP || null;
+      if (!pass.camera || !P || !P.Mat4) return null;
+      try {
+        const cam = pass.camera.camera;
+        const vp = new P.Mat4().mul2(cam.projectionMatrix, cam.viewMatrix);
+        return Float32Array.from(vp.data);
+      } catch (_) { return null; }
+    },
+
+    destroyDepthPass(pass) {
+      if (!pass) return;
+      pendingDepthPasses.delete(pass);
+      if (pass.useGsplat) {
+        // renderer 是共享单例（由 viewer 管理生命周期），这里只清引用，不销毁。
+        pass.texture = null; pass.projVP = null; pass.renderer = null;
+        return;
+      }
+      try {
+        if (pass.meshInstance) pass.layer.removeMeshInstances([pass.meshInstance], false);
+        if (pass.mesh) pass.mesh.destroy();
+      } catch (_) { /* noop */ }
+      try { pass.layer.destroy(); } catch (_) { /* noop */ }
+      try { pass.camera.destroy(); } catch (_) { /* noop */ }
+      try { pass.texture.destroy(); } catch (_) { /* noop */ }
+      try { pass.target.destroy(); } catch (_) { /* noop */ }
+      try { pass.material.destroy(); } catch (_) { /* noop */ }
     }
   };
 

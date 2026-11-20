@@ -17,6 +17,7 @@
  * 兼容：?nocache=1 可退化为「单 iframe + 跨场景重载」低显存模式。
  * ============================================================ */
 import { initMiniMap } from '../mini-map.js';
+import { createAnnotationPanel } from '../browse-ann-ui.js';
 
 /* ---------- 楼层路由表：URL / 场景 / 出生点 / 小地图 / HUD 初值 ---------- */
 const VIEWS = {
@@ -65,6 +66,8 @@ const BRIGHT_KEY = 'gsBrightness';
 const BRIGHT_MIN = 0.4, BRIGHT_MAX = 1.8;
 let brightness = readBrightness();
 let brightnessPanel = null;
+let panoPanel = null;
+let annPanel = null;       // 场景图层（编辑器标注的浏览态显隐）面板实例
 
 /* 楼层导览自动跟随：只在「室外 / 一层」同场景自由漫游时按相机位置判定 */
 let autoFloorHoldUntil = 0;     // 自动跟随冷却截止时间戳（ms），与心跳频率解耦
@@ -266,7 +269,8 @@ function yieldMapForPanels(on) {
 function anyRightPanelOpen() {
   const c = $('gs-console'), s = $('speedPanel');
   return (c && !c.hidden) || (s && !s.classList.contains('hidden')) ||
-    (brightnessPanel && !brightnessPanel.hidden);
+    (brightnessPanel && !brightnessPanel.hidden) || (panoPanel && !panoPanel.hidden) ||
+    (annPanel && annPanel.isOpen());
 }
 function closeRightPanels() {
   const c = $('gs-console');
@@ -275,6 +279,14 @@ function closeRightPanels() {
   if (brightnessPanel && !brightnessPanel.hidden) {
     brightnessPanel.hidden = true;
     $('gsBrightnessBtn')?.classList.remove('is-on');
+  }
+  if (panoPanel && !panoPanel.hidden) {
+    panoPanel.hidden = true;
+    $('gsPanoBtn')?.classList.remove('is-on');
+  }
+  if (annPanel && annPanel.isOpen()) {
+    annPanel.setOpen(false);
+    $('gsAnnBtn')?.classList.remove('is-on');
   }
 }
 
@@ -392,6 +404,157 @@ function mountBrightness() {
     });
   }
   applyBrightness(brightness, true);
+}
+
+/* ---------- 2c. 720° 全景图导出（当前机位 / 分辨率可选 / PNG 下载） ----------
+   采集与球面拼接在 iframe 内由 viewer/panorama.js 完成（复用 captureFrame 离屏
+   取六面，不依赖 preserveDrawingBuffer）；父页只负责面板、进度和下载。 */
+function togglePanoPanel(force) {
+  const p = panoPanel;
+  if (!p) return;
+  const show = force === undefined ? p.hidden : !!force;
+  if (show) {
+    const c = $('gs-console');
+    if (c && !c.hidden) { c.hidden = true; $('gsConsoleBtn')?.classList.remove('is-on'); }
+    if (brightnessPanel && !brightnessPanel.hidden) {
+      brightnessPanel.hidden = true;
+      $('gsBrightnessBtn')?.classList.remove('is-on');
+    }
+    try { window.hideOverlay?.('speedPanel', 'block'); } catch (_) { /* noop */ }
+    const pose = win()?.__mgPose?.();
+    const pos = pose?.position;
+    const el = p.querySelector('#gsPanoPos');
+    if (el) el.textContent = pos
+      ? '当前机位：' + pos.map((n) => Number(n).toFixed(2)).join(', ')
+      : '当前机位：读取中…';
+  }
+  p.hidden = !show;
+  $('gsPanoBtn')?.classList.toggle('is-on', show);
+  yieldMapForPanels(anyRightPanelOpen());
+}
+function mountPanoPanel() {
+  const st = stage();
+  if (!st || panoPanel) return;
+  const p = document.createElement('section');
+  p.id = 'gsPanoPanel';
+  p.className = 'hud-panel gs-pano-panel';
+  p.hidden = true;
+  p.innerHTML =
+    '<div class="gs-pano-hd"><div><b>全景图导出</b>' +
+      '<small>720° EQUIRECTANGULAR · PNG</small></div>' +
+      '<button type="button" class="gs-pano-close" aria-label="关闭">×</button></div>' +
+    '<div class="gs-pano-pos" id="gsPanoPos">当前机位：读取中…</div>' +
+    '<div class="gs-pano-row"><label for="gsPanoRes">输出分辨率</label>' +
+      '<select class="gs-pano-select" id="gsPanoRes">' +
+        '<option value="2048">2048 × 1024（标准）</option>' +
+        '<option value="4096" selected>4096 × 2048（高清）</option>' +
+        '<option value="8192">8192 × 4096（超清）</option>' +
+      '</select></div>' +
+    '<button type="button" class="gs-pano-go" id="gsPanoGo">生成并导出 PNG</button>' +
+    '<div class="gs-pano-status" id="gsPanoStatus">就绪 · 以当前相机位置为全景中心</div>' +
+    '<div class="gs-pano-tip">请在想要的位置停下后再生成。采集时相机会短暂环视六个方向，' +
+      '完成后自动回到原机位；超清档需要更多显存与时间。</div>';
+  st.appendChild(p);
+  panoPanel = p;
+  p.querySelector('.gs-pano-close')?.addEventListener('click', () => togglePanoPanel(false));
+  p.querySelector('#gsPanoGo')?.addEventListener('click', () => exportPanorama());
+}
+async function exportPanorama() {
+  const btn = $('gsPanoGo'), status = $('gsPanoStatus');
+  if (!btn || btn.disabled) return;
+  const api = win()?.__mgPanorama;
+  if (!api?.supported) { toast('全景模块尚未就绪，请稍后重试'); return; }
+  const res = Number($('gsPanoRes')?.value) || 4096;
+  btn.disabled = true; btn.textContent = '生成中…';
+  const mark = (m) => { if (status) status.textContent = m; };
+  try {
+    const r = await api.generate({ face: Math.round(res / 4), onProgress: mark });
+    const a = document.createElement('a');
+    a.href = r.dataUrl;
+    a.download = `panorama_${r.width}x${r.height}_${Date.now()}.png`;
+    document.body.appendChild(a); a.click(); a.remove();
+    mark(`已导出 ${r.width} × ${r.height} PNG`);
+    toast('全景图已导出');
+  } catch (e) {
+    mark('失败：' + (e?.message || e));
+    toast('全景生成失败：' + (e?.message || e));
+  } finally {
+    btn.disabled = false; btn.textContent = '生成并导出 PNG';
+  }
+}
+
+/* ---------- 2c-2. 场景图层：编辑器标注的浏览态显隐控制 ----------
+   标注数据由 iframe 内的 browse-annotations.js 读取 localStorage
+   （mg3dgs.annotations.v1）并只读渲染到三维画面上；父页只负责面板 UI，
+   通过同源直接调用 window.__mgBrowseAnn 的 tree() / toggle() / setAll()。
+   不跨 iframe 传几何：投影全部发生在与相机同一个文档里。 */
+function annApi() {
+  try { return win()?.__mgBrowseAnn || null; } catch (_) { return null; }
+}
+function syncAnnPanel() {
+  if (!annPanel || !annPanel.isOpen()) return;
+  try { annPanel.refresh(); } catch (_) { /* noop */ }
+}
+function mountAnnPanel() {
+  const st = stage();
+  if (!st || annPanel) return annPanel;
+  annPanel = createAnnotationPanel({
+    mount: st,
+    id: 'gs-ann-panel',
+    // 与「三维功能 / 全景图」同一右侧列，避免与小地图、辅助条交叠
+    style: { right: '56px', top: '210px', width: '330px', maxHeight: 'calc(100% - 240px)' },
+    getTree: () => {
+      const t = annApi()?.tree?.();
+      if (t) return t;
+      // iframe / 模块尚未就绪：返回一个空壳，让面板给出可读提示而不是「载入中」卡死
+      const api = annApi();
+      return api ? { sceneLabel: '当前场景', total: 0, shown: 0, groups: [], layers: [] } : null;
+    },
+    onToggle: (kind, id, on) => {
+      const api = annApi();
+      if (!api?.toggle) { toast('三维场景尚未就绪，请稍候再试'); return; }
+      api.toggle(kind, id, on);
+    },
+    onAll: (mode) => {
+      const api = annApi();
+      if (!api?.setAll) { toast('三维场景尚未就绪，请稍候再试'); return; }
+      api.setAll(mode);
+      toast(mode === 'off' ? '已隐藏全部标注' : (mode === 'on' ? '已显示全部标注' : '已恢复编辑器默认显隐'));
+    },
+    onRefresh: () => {
+      const api = annApi();
+      if (!api?.refresh) { toast('三维场景尚未就绪，请稍候再试'); return; }
+      api.refresh('ui');
+      setTimeout(syncAnnPanel, 60);
+    },
+    onOpenChange: (open) => $('gsAnnBtn')?.classList.toggle('is-on', open),
+    emptyText: '三维场景还没就绪…'
+  });
+  annPanel.setOpen(false);
+  return annPanel;
+}
+function toggleAnnPanel(force) {
+  const p = mountAnnPanel();
+  if (!p) return;
+  const show = force === undefined ? !p.isOpen() : !!force;
+  if (show) {
+    // 右侧面板互斥：同一列先收起其它面板
+    const c = $('gs-console');
+    if (c && !c.hidden) { c.hidden = true; $('gsConsoleBtn')?.classList.remove('is-on'); }
+    try { window.hideOverlay?.('speedPanel', 'block'); } catch (_) { /* noop */ }
+    if (brightnessPanel && !brightnessPanel.hidden) {
+      brightnessPanel.hidden = true;
+      $('gsBrightnessBtn')?.classList.remove('is-on');
+    }
+    if (panoPanel && !panoPanel.hidden) {
+      panoPanel.hidden = true;
+      $('gsPanoBtn')?.classList.remove('is-on');
+    }
+  }
+  p.setOpen(show);
+  $('gsAnnBtn')?.classList.toggle('is-on', show);
+  yieldMapForPanels(anyRightPanelOpen());
+  if (show) syncAnnPanel();
 }
 
 /* ---------- 2d. 楼层导览自动跟随相机 ----------
@@ -572,6 +735,11 @@ function syncStatus() {
 /* 功能清单：三维查看器顶栏 / 工具箱 / 帮助里的每一项都有对应按钮 */
 const GROUPS = [
   { title: '视图 / 相机', items: [
+    ['导出 720° 全景图', () => { mountPanoPanel(); togglePanoPanel(true); }],
+    ['场景图层 / 标注显隐', () => toggleAnnPanel(true)],
+    ['全部显示标注', () => { annApi()?.setAll?.('on'); syncAnnPanel(); }],
+    ['全部隐藏标注', () => { annApi()?.setAll?.('off'); syncAnnPanel(); }],
+    ['重新读取标注', () => { annApi()?.refresh?.('console'); toast('已重新读取编辑器标注'); }],
     ['场景亮度调节', () => toggleBrightnessPanel(true)],
     ['亮度重置 100%', () => applyBrightness(1)],
     ['重置相机 R', () => { press('r'); toast('已重置相机到出生点'); }],
@@ -681,6 +849,10 @@ function toggleConsole(force) {
 const ICON_CUBE = '<path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/>';
 const ICON_MAP = '<path d="M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3z"/><path d="M9 3v15M15 6v15"/>';
 const ICON_EDIT = '<path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M14 5l4 4"/>';
+const ICON_PANO = '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>';
+/* 场景图层：三层堆叠（layers-triple 的线性等价物） */
+const ICON_LAYERS = '<path d="M12 3 3 7.5l9 4.5 9-4.5z"/><path d="M3 12l9 4.5 9-4.5"/>' +
+  '<path d="M3 16.5 12 21l9-4.5"/>';
 function quickButton(id, label, paths, onClick) {
   const b = document.createElement('button');
   b.type = 'button';
@@ -710,11 +882,15 @@ function mountQuickBar() {
   bar.replaceChildren(
     quickButton('gsMapBtn', '导览图', ICON_MAP, toggleMap),
     quickButton('gsConsoleBtn', '三维功能', ICON_CUBE, () => toggleConsole()),
+    quickButton('gsAnnBtn', '场景图层', ICON_LAYERS, () => toggleAnnPanel()),
+    quickButton('gsPanoBtn', '全景图', ICON_PANO, () => { mountPanoPanel(); togglePanoPanel(); }),
     quickButton('gsEditorBtn', '标注编辑', ICON_EDIT, () => enterEditor())
   );
   const m = mapApi?.getState?.();
   $('gsMapBtn')?.classList.toggle('is-on', !m || m.visible);
   $('gsConsoleBtn')?.classList.toggle('is-on', !$('gs-console')?.hidden);
+  $('gsAnnBtn')?.classList.toggle('is-on', !!annPanel && annPanel.isOpen());
+  $('gsPanoBtn')?.classList.toggle('is-on', !!panoPanel && !panoPanel.hidden);
 }
 
 /* 把展厅页原有的按钮接到真实三维功能上（每次视图替换后重新绑定） */
@@ -959,6 +1135,13 @@ function wireEditor() {
     } else if (d.type === 'mg-editor-mounted') {
       if (d.ok) toast('标注编辑模式 · WASD 漫游，鼠标操作编辑面板');
       else toast('标注编辑器装载失败：' + (d.error || '未知错误'));
+    } else if (d.type === 'mg-ann-changed') {
+      // iframe 内标注数据 / 显隐变了（退出编辑、其它标签页写入、面板操作）
+      syncAnnPanel();
+    } else if (d.type === 'mg-ann-editor') {
+      // iframe 侧确认进入 / 退出编辑态：进编辑一律收起右侧面板，退出后刷新树
+      if (d.on) { try { closeRightPanels(); } catch (_) { /* noop */ } }
+      else syncAnnPanel();
     }
   });
   // 焦点在父页时（刚点过入口按钮）也允许 Esc 退出
@@ -976,6 +1159,7 @@ window.__mgEditorHost = {
 /* ---------- 启动 ---------- */
 function boot() {
   buildConsole();
+  mountPanoPanel();     // 全景面板挂 #stage，跨视图切换常驻
   wireRouter();
   wireEditor();
   startHudSync();
@@ -1009,6 +1193,17 @@ function boot() {
     detect: detectFloorZone,
     apply: applyFloorHighlight,
     releaseHold: () => { autoFloorHoldUntil = 0; }
+  };
+  /* 场景图层（浏览态标注显隐）：回归脚本与现场运维的统一入口 */
+  window.__mgAnnUI = {
+    mount: mountAnnPanel,
+    toggle: (on) => toggleAnnPanel(on),
+    isOpen: () => !!annPanel && annPanel.isOpen(),
+    tree: () => annApi()?.tree?.() || null,
+    stats: () => annApi()?.stats?.() || null,
+    setVisible: (kind, id, on) => { annApi()?.toggle?.(kind, id, on); syncAnnPanel(); },
+    setAll: (mode) => { annApi()?.setAll?.(mode); syncAnnPanel(); },
+    refresh: () => { annApi()?.refresh?.('api'); syncAnnPanel(); }
   };
 }
 if (document.readyState === 'loading') {

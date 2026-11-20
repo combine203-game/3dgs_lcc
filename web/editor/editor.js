@@ -26,7 +26,9 @@ import { createPicker } from './picking.js';
 import { Overlay } from './overlay.js';
 import { createPanel } from './panel.js';
 import { KINDS, makeAnnotation, LAYER_PALETTE, GROUP_PALETTE, DEFAULT_GROUP_ID,
-  screenRectUV, buildDecalProjector, projectorOBBCorners } from './schema.js';
+  screenRectUV, buildDecalProjector, projectorOBBCorners, projectorVolumeCorners,
+  buildShadowDepthMap, makeFrustumProjector, retuneFrustumProjector } from './schema.js';
+import { rayHitMesh } from './mesh-pick.js';
 import { createDecalProjection } from './decal-projection.js';
 import { resolveEngineAdapter } from '../engine/index.js';
 
@@ -39,7 +41,8 @@ function requestExit() {
 /* 工具快捷键统一走 Shift+字母。
    字母刻意避开 W A S D —— 这四个键归漫游，且引擎按 event.code 判定，
    用 Shift+A 切「面」会和「Shift 加速 + A 左移」打架。 */
-const SHIFT_KEYS = { V: 'select', P: 'point', L: 'line', E: 'area', B: 'board', N: 'screen', R: 'decal', M: 'measure' };
+const SHIFT_KEYS = { V: 'select', P: 'point', L: 'line', E: 'area', B: 'board', N: 'screen',
+  R: 'decal', F: 'frustum', M: 'measure' };
 /* 引擎 / 宿主的单键快捷键，编辑模式下一律屏蔽（不让它抢走按键） */
 const ENGINE_KEYS = new Set(['v', 'h', 'g', 'r', 'f', ' ', '1', '2', '3', '4', '5', 'p', 'l', 'b', 't', 'm']);
 /* 漫游键：必须放行给引擎 */
@@ -110,6 +113,10 @@ export async function mount(opts = {}) {
     activeGroupId: DEFAULT_GROUP_ID,     // 当前分组：新绘制的标注自动归入
     depthOn: readBool(DEPTH_KEY, true),
     planeDistance: readNum(PLANE_KEY, 6),
+    // 透视贴花（视锥体）的布设默认值：竖直 FOV（度）/ 宽高比。
+    // 远距默认取「光心 → 指向目标」的实际距离（见 finishDraft）。
+    projFov: 45,
+    projAspect: 16 / 9,
     // 全局「显示碰撞体 MESH」：仅编辑模式有效，退出时恢复进编辑前的值
     meshVisible: readBool(MESH_KEY, false),
     meshOverlayReady: !!window.__mgCollisionDebug,
@@ -210,6 +217,7 @@ export async function mount(opts = {}) {
       .map(a => ({
         id: a.id,
         projector: a.projector,
+        shadow: a.projector && a.projector.shadow,
         videoUrl: a.media && a.media[0] && a.media[0].type === 'video' ? a.media[0].url : null,
         visible: a.visible !== false,
         opacity: Number(a.style.decalOpacity ?? 0.9),
@@ -606,6 +614,10 @@ export async function mount(opts = {}) {
         if (opts.backToSelect) { state.tool = 'select'; panel.render(getState()); }
         return;
       }
+      /* 透视贴花复用 kind='decal'：渲染 / 显隐 / 视频源 / 导入导出全链路同一套，
+         只是投影机换成透视视锥体（projector.mode='persp'）。工具 id 与注记 kind
+         在此显式分叉，避免再复制一份贴花实现。 */
+      const kind = state.tool === 'frustum' ? 'decal' : state.tool;
       const layerId = store.layers()[0]?.id || 'default';
       const style = { color: store.layer(layerId)?.color || '#22d3ee' };
       if (state.tool === 'decal' && draftNormal) style.normal = draftNormal;
@@ -617,7 +629,18 @@ export async function mount(opts = {}) {
         const cr = cv?.getBoundingClientRect?.();
         if (cr) rect = screenRectUV(cr, draftScreen[0], draftScreen[1]);
       }
-      const a = makeAnnotation(state.tool, draft, {
+      /* 透视贴花：两次点击 = 光心 → 指向目标，far 默认取两点距离
+         （视锥体刚好够到用户点的那个表面），near 取 far 的 2%。 */
+      let projector = null;
+      if (state.tool === 'frustum') {
+        const dist = Math.hypot(draft[1][0] - draft[0][0], draft[1][1] - draft[0][1],
+          draft[1][2] - draft[0][2]);
+        projector = makeFrustumProjector(draft[0], draft[1], {
+          far: dist, fov: state.projFov, aspect: state.projAspect
+        });
+        if (!projector) panel.status('透视贴花：两次落点太近，无法确定视锥方向，已改用默认朝向');
+      }
+      const a = makeAnnotation(kind, draft, {
         scene: state.scene,
         layerId,
         groupId: state.activeGroupId,     // 归入当前分组
@@ -627,10 +650,18 @@ export async function mount(opts = {}) {
         // 而不是用第一个落点粗略反推（多顶点标注尤其不准）。
         view: window.__mgPose?.() || null,
         rect,
-        surface: null
+        surface: null,
+        projector
       });
       store.add(a);
-      if (state.tool === 'decal') {
+      if (state.tool === 'frustum') {
+        syncDecals();
+        panel.status(projector
+          ? `透视贴花已生成视锥体 · 光心 (${projector.position.map(v => v.toFixed(1)).join(', ')}) · ` +
+            `FOV ${projector.fov.toFixed(0)}° · 远距 ${projector.far.toFixed(2)}m · 近距 ${projector.near.toFixed(2)}m` +
+            ' · 在属性面板可调 FOV / 宽高比 / 远距，或拖视锥手柄'
+          : '透视贴花已创建，但视锥体没有生成（请重画两点或调大远距）');
+      } else if (state.tool === 'decal') {
         if (rect) rebuildDecalProjector(a.id);
         else panel.status('贴面矩形：画布尺寸不可用，请在属性面板点「重新投射投影机」');
       }
@@ -660,9 +691,18 @@ export async function mount(opts = {}) {
   async function rebuildDecalProjector(id) {
     const a = store.get(id);
     if (!a || a.kind !== 'decal' || !a.rect) return;
+    // 透视贴花的视锥体由两次点击直接布设，与屏幕矩形 / 深度反算无关；
+    // 重建 OBB 会把它覆盖成正交投影机，所以这里必须拦住。
+    if (a.projector && a.projector.mode === 'persp') {
+      panel.status('透视贴花的视锥体不参与深度反算重建；如需换位置请重新绘制或拖动手柄');
+      return;
+    }
     const token = (decalTokens.get(id) || 0) + 1;
     decalTokens.set(id, token);
-    const grid = await picker.unprojectRect(a.rect, 6, 6, { pickTimeout: 4000 });
+    /* 单点 pick 超时：真机 picker 正常 <100ms 返回，900ms 足够；
+       无头 SwiftShader 下 CPU readback 挂死时用较短超时快速退化到碰撞 mesh，
+       避免 49 点×多批累计几十秒（曾导致投影机长时间写不回、贴花不显示）。 */
+    const grid = await picker.unprojectRect(a.rect, 6, 6, { pickTimeout: 900 });
     const cur = store.get(id);
     if (!cur || decalTokens.get(id) !== token) return;
     if (!grid) {
@@ -672,16 +712,27 @@ export async function mount(opts = {}) {
     /* 「只有包围盒、没有视频」的数据层根因：框选区域横跨远近物体（或深度拾取
        超时退化到碰撞网格）时，网格点深度跨度可达几十米，OBB 会变成 26m×10m
        的巨盒 —— GPU 逐像素反算与它相交的只有零星碎片，投射必然斑驳不可见。
-       这里做两道拦截：深度跨度 + 盒尺寸，超限就明确提示，宁可不投也不投碎片。 */
+       这里做两道拦截：深度跨度 + 盒尺寸，超限就明确提示，宁可不投也不投碎片。
+
+       ★ 跨度必须用鲁棒分位数（p10~p90）而非 min/max：真机实测室内墙面
+       49 点里常有 1~2 个点深度拾取失败退化到碰撞网格 / 落到前景近物，
+       min=6.5m、max=24m 把 min/max 口径的 spread 顶到 1.42 > 1.2，
+       于是整块纯墙面被误判为「跨度过大」而拒绝生成投影机 —— 表现正是
+       「只有框线没有视频」。而 p10=7.0 / p90=16.3 / med=12.4，
+       分位数口径 spread=(16.3-7.0)/12.4≈0.75 < 1.2，能正确放行。
+       真正横跨多表面的场景分位数跨度依然大，仍会被拦截。 */
     const pts = (grid.points || []).filter(Boolean);
     if (pts.length) {
       const cam = cameraWorldPosition() || [0, 0, 0];
       const dists = pts.map(p => Math.hypot(p[0] - cam[0], p[1] - cam[1], p[2] - cam[2]));
       const sorted = [...dists].sort((x, y) => x - y);
-      const med = sorted[Math.floor(sorted.length / 2)] || 0;
-      const spread = med > 0.5 ? (sorted[sorted.length - 1] - sorted[0]) / med : 0;
+      const q = (f) => sorted[Math.min(sorted.length - 1, Math.floor(f * (sorted.length - 1)))];
+      const med = q(0.5) || 0;
+      const lo = q(0.1), hi = q(0.9);
+      // 鲁棒跨度：p10~p90 相对中位数；离群点不再主导判断
+      const spread = med > 0.5 ? (hi - lo) / med : 0;
       if (med > 60 || spread > 1.2) {
-        panel.status(`贴面矩形：框选区域深度跨度过大（近 ${sorted[0].toFixed(1)}m ~ 远 ${sorted[sorted.length - 1].toFixed(1)}m），请贴近目标重新框选，否则投射会碎片化`);
+        panel.status(`贴面矩形：框选区域深度跨度过大（主区间 ${lo.toFixed(1)}m ~ ${hi.toFixed(1)}m，中位 ${med.toFixed(1)}m），请贴近目标重新框选，否则投射会碎片化`);
         return;
       }
     }
@@ -691,16 +742,39 @@ export async function mount(opts = {}) {
       panel.status(`贴面矩形：生成区域过大（宽 ${(projector.half[0] * 2).toFixed(1)}m × 高 ${(projector.half[1] * 2).toFixed(1)}m），请框选较小的屏幕区域`);
       return;
     }
+    /* 标准三段式：Pass1 由 GPU depth-only 相机生成 D32_FLOAT 深度纹理
+       （decal-projection.syncShadowPass），不再用 CPU 射线采样。只有引擎不支持
+       depth-only pass 时才回退这里的 CPU 24² 深度图。 */
+    if (!decalMgr || !decalMgr.shadowPathSupported) {
+      try {
+        const col = window.__viewer?.collision?.();
+        if (col && typeof col.queryRay === 'function') {
+          const raycast = (ox, oy, oz, dx, dy, dz, maxDist) => {
+            const h = rayHitMesh({ queryRay: (...args) => col.queryRay(...args) }, [ox, oy, oz], [dx, dy, dz], maxDist);
+            return h ? h.pos : null;
+          };
+          projector.shadow = buildShadowDepthMap(projector, raycast, { n: 24 });
+        }
+      } catch (_) { projector.shadow = null; }
+    }
     store.update(id, { surface: grid, projector });
     syncDecals();
-    panel.status(`贴面矩形已生成投影机 OBB · 宽 ${(projector.half[0] * 2).toFixed(2)}m × 高 ${(projector.half[1] * 2).toFixed(2)}m（深度反算表面）`);
+    const shadowInfo = (decalMgr && decalMgr.shadowPathSupported)
+      ? ' · GPU 深度图 Pass1（正交投影仪）'
+      : (projector.shadow ? ` · 深度图 ${projector.shadow.n}²（${projector.shadow.hits} 命中）` : ' · 深度图不可用(回退旧口径)');
+    panel.status(`贴面矩形已生成投影机 OBB · 宽 ${(projector.half[0] * 2).toFixed(2)}m × 高 ${(projector.half[1] * 2).toFixed(2)}m${shadowInfo}`);
   }
 
-  /** 示例数据 / 旧文档里只带 rect 或 surface、没有 projector 的贴面，挂载后自动补算一次 */
+  /** 示例数据 / 旧文档里只带 rect 或 surface、没有 projector 的贴面，挂载后自动补算一次。
+      另外：旧 projector 没有 shadow 深度图时也要补算一次（shadowmap 贴花路线）。 */
   function ensureDecalProjectors() {
     for (const a of store.list(state.scene)) {
       if (a.kind !== 'decal' || !a.rect) continue;
-      if (a.projector) continue;
+      // 透视贴花有自己的 projector，不存在「首次加载补算」这回事
+      if (a.projector && a.projector.mode === 'persp') continue;
+      // 标准三段式只需 projector（GPU Pass1 自动同步）；旧路径才要求 CPU 深度图
+      if (a.projector && (decalMgr && decalMgr.shadowPathSupported ||
+          (a.projector.shadow && a.projector.shadow.depth))) continue;
       if (decalTokens.get(a.id + ':auto')) continue;
       decalTokens.set(a.id + ':auto', true);
       rebuildDecalProjector(a.id).finally(() => decalTokens.delete(a.id + ':auto'));
@@ -905,6 +979,17 @@ export async function mount(opts = {}) {
       case 'property': {
         const { id, field, val } = payload || {};
         if (!id) break;
+        /* 透视视锥体参数（FOV / 宽高比 / 远距 / 近距）直接进 projector，
+           不进 style：half 与 fov 必须始终自洽，统一由 retuneFrustumProjector
+           重算，避免面板写一半、shader 用一半。 */
+        const PROJ_FIELD = { projFov: 'fov', projAspect: 'aspect', projFar: 'far', projNear: 'near' }[field];
+        if (PROJ_FIELD) {
+          const cur = store.get(id);
+          if (!cur || cur.kind !== 'decal' || cur.projector?.mode !== 'persp') break;
+          const next = retuneFrustumProjector(cur.projector, { [PROJ_FIELD]: Number(val) });
+          if (next) { store.update(id, { projector: next }); syncDecals(); }
+          break;
+        }
         // size / color / opacity / labelAlways / 动线样式 / 引线锚点都是 style 子字段
         const STYLE_FIELDS = ['color', 'opacity', 'labelAlways', 'size',
           'bandWidth', 'flowSpeed', 'flowArrow', 'leadTo',
@@ -917,7 +1002,9 @@ export async function mount(opts = {}) {
         const target = store.get(id);
         store.update(id, patch, { coalesceKey: 'field:' + id + ':' + field });
         // 投影机盒厚（decalDepth）变了：仅重算 OBB 半尺寸，无需重采表面
-        if (field === 'decalDepth' && target?.kind === 'decal' && Number.isFinite(Number(val))) {
+        // 透视视锥体的「厚度」由 far 决定，不走 decalDepth（否则 half[2] 会被写坏）
+        if (field === 'decalDepth' && target?.kind === 'decal' &&
+            target?.projector?.mode !== 'persp' && Number.isFinite(Number(val))) {
           const a = store.get(id);
           if (a && a.projector) {
             const half = a.projector.half.slice();

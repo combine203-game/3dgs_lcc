@@ -1,11 +1,11 @@
 {
   "gpuAdapter": "adapter-ok",
-  "baseMean": 92.45,
+  "baseMean": 92.475,
   "editorMean": 92.45,
-  "worst": 93.17,
+  "worst": 99.9,
   "blank": false,
   "collapse": false,
-  "drift": 0.009410492157923098,
+  "drift": 0.09075175770686858,
   "decalDebug": {
     "enabled": true,
     "degraded": false,
@@ -15,10 +15,32 @@
       1258,
       650
     ],
-    "pickTextureFormat": 12,
+    "lastGpuError": null,
+    "scopedErrors": 0,
+    "foreignErrors": 0,
+    "pickTextureFormat": "rgba16f",
+    "options": {
+      "boxScale": 1,
+      "depthMode": 1,
+      "debugMode": 0,
+      "depthTest": 0,
+      "useShadowPass": 1,
+      "shadowSize": 256,
+      "videoFlipY": 1,
+      "renderEnabled": 1,
+      "maxFps": 30,
+      "uploadFps": 0,
+      "pcf": 1,
+      "normalCut": 0.9,
+      "softMask": 1
+    },
+    "renderEnabled": 1,
+    "maxFps": 30,
+    "uploadFps": 0,
+    "dpr": 1,
     "instances": [
       {
-        "id": "diag-decal-1794577346334",
+        "id": "diag-decal-1795167795739",
         "visible": true,
         "hasProjector": true,
         "videoUrl": null,
@@ -26,16 +48,32 @@
         "videoReady": false,
         "videoErr": null,
         "texW": 1024,
-        "texH": 576
+        "texH": 576,
+        "shadowReady": false,
+        "shadowSize": null,
+        "shadowHits": null,
+        "depthTestOption": 0,
+        "boxScale": 1,
+        "depthMode": 1,
+        "debugMode": 0,
+        "cull": 0,
+        "pcf": 1,
+        "normalCut": 0.9,
+        "softMask": 1,
+        "useShadow": true,
+        "depthPassOk": false,
+        "hasProjVP": false,
+        "hasShadowTex": false,
+        "effectiveDepthTest": false
       }
     ]
   },
   "pageGpuErr": 0,
   "gpuErrTotal": 0,
   "pickReadyOk": true,
-  "visAvg": 93.245,
+  "visAvg": 100.47,
   "hiddenMean": 92.46,
-  "projDelta": 0.7850000000000108,
+  "projDelta": 8.010000000000005,
   "projOk": true,
   "demoOk": true,
   "rebuild": {
@@ -61,6 +99,21 @@
     "status": "正在按当前视角重新投射投影机…"
   },
   "guardOk": true,
+  "persp": {
+    "id": "diag-persp-1795167932140",
+    "half": [
+      6.4661328597493135,
+      3.637199733608989,
+      7.8
+    ],
+    "fov": 50,
+    "near": 0.156,
+    "far": 7.8
+  },
+  "perspOn": 110.03,
+  "perspOff": 92.46,
+  "perspDelta": 17.570000000000007,
+  "perspOk": true,
   "shaderErrors": [],
   "errors": [],
   "warns": [],
@@ -93,8 +146,8 @@
       },
       "px": {
         "n": 91140,
-        "mean": 92.45,
-        "sd": 46.26,
+        "mean": 92.5,
+        "sd": 46.24,
         "nearBlack": 0.0123,
         "blank": false
       }
@@ -128,7 +181,7 @@
         "n": 91140,
         "mean": 92.45,
         "sd": 46.26,
-        "nearBlack": 0.0123,
+        "nearBlack": 0.0124,
         "blank": false
       }
     },
@@ -161,7 +214,7 @@
         "n": 91140,
         "mean": 92.45,
         "sd": 46.26,
-        "nearBlack": 0.0123,
+        "nearBlack": 0.0124,
         "blank": false
       }
     },
@@ -192,8 +245,8 @@
       },
       "px": {
         "n": 91140,
-        "mean": 93.31,
-        "sd": 47.8,
+        "mean": 100.58,
+        "sd": 57.89,
         "nearBlack": 0.0123,
         "blank": false
       }
@@ -225,8 +278,8 @@
       },
       "px": {
         "n": 91140,
-        "mean": 93.17,
-        "sd": 47.59,
+        "mean": 100.56,
+        "sd": 57.85,
         "nearBlack": 0.0123,
         "blank": false
       }
@@ -258,8 +311,8 @@
       },
       "px": {
         "n": 91140,
-        "mean": 93.18,
-        "sd": 47.59,
+        "mean": 99.9,
+        "sd": 57.08,
         "nearBlack": 0.0123,
         "blank": false
       }
@@ -291,8 +344,8 @@
       },
       "px": {
         "n": 91140,
-        "mean": 93.32,
-        "sd": 47.82,
+        "mean": 100.84,
+        "sd": 58.19,
         "nearBlack": 0.0123,
         "blank": false
       }
@@ -315,6 +368,72 @@
         "backend": "webgpu",
         "gpuApi": true,
         "decals": 2,
+        "decalMgr": true,
+        "editorOn": true,
+        "tool": "decal",
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 91140,
+        "mean": 92.46,
+        "sd": 46.26,
+        "nearBlack": 0.0123,
+        "blank": false
+      }
+    },
+    {
+      "label": "persp-on",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "backend": "webgpu",
+        "gpuApi": true,
+        "decals": 3,
+        "decalMgr": true,
+        "editorOn": true,
+        "tool": "decal",
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 91140,
+        "mean": 110.03,
+        "sd": 68.93,
+        "nearBlack": 0.0123,
+        "blank": false
+      }
+    },
+    {
+      "label": "persp-off",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          650
+        ],
+        "backend": "webgpu",
+        "gpuApi": true,
+        "decals": 3,
         "decalMgr": true,
         "editorOn": true,
         "tool": "decal",

@@ -126,6 +126,18 @@ async function main() {
   }
 
   await send('Page.navigate', { url: BASE + '/' });
+  await sleep(1200);
+  /* 对照实验开关：贴花模块在 iframe 内读 sessionStorage（同源共享），
+     必须在模块求值前写入，因此写完立即 reload。 */
+  const SHADOW = process.env.DECAL_SHADOW;   // '0' = 关闭 shadow-map 三段式
+  const DEPTH = process.env.DECAL_DEPTH;     // '0' = 关闭深度比较
+  if (SHADOW !== undefined || DEPTH !== undefined) {
+    await E(`(()=>{ if (${JSON.stringify(SHADOW)} !== undefined)
+      sessionStorage.setItem('mg_shadow_pass', ${JSON.stringify(SHADOW)});
+      if (${JSON.stringify(DEPTH)} !== undefined)
+      sessionStorage.setItem('mg_decal_depth', ${JSON.stringify(DEPTH)}); return 1; })()`);
+    await send('Page.reload', { ignoreCache: true });
+  }
   await sleep(WAIT);
 
   const DOC = `(()=>{const f=document.querySelector('iframe.gs-scene-frame[data-active="1"]')||document.querySelector('iframe.gs-scene-frame');return f?f.contentWindow:window;})()`;
@@ -299,6 +311,15 @@ async function main() {
       status:W.document.querySelector('[data-role="status"]')?.textContent||''
     });})()`);
   console.log('  按当前视角重建投影机 =', rebuilt);
+  /* 着色器诊断探针：DECAL_DEBUG=2 时 shadow FS 用颜色标出 Pass1 深度图状态
+     （蓝=投影 UV 越界 / 品红=深度图为空 / 绿=有深度），配合截图肉眼定位。 */
+  if (process.env.DECAL_DEBUG) {
+    const dbgSet = await E(`(()=>{const W=${DOC},ed=W.__mgEditor;
+      if(!ed?.decalMgr?.setOptions) return 'no-setOptions';
+      return JSON.stringify(ed.decalMgr.setOptions({debugMode:${Number(process.env.DECAL_DEBUG)||0}}));})()`);
+    console.log('  debugMode 已设置 =', dbgSet);
+    await sleep(1200);
+  }
   /* 巨盒拦截：headless 里深度拾取超时 → 全部退化 MESH → 深度跨度巨大。
      新的数据层守卫必须拒绝建盒（面板提示"深度跨度过大"），且不得把
      手工 OBB 覆盖成巨盒。真机上深度拾取正常时则应正常建盒（小尺寸）。 */
@@ -342,6 +363,43 @@ async function main() {
     return n;})()`);
   await sleep(1200);
   console.log('  A/B: 隐藏贴面 =', abHide, '（已恢复显示）');
+
+  /* ===== 透视贴花（视锥体）A/B：证明「透视投影 + 透视深度 Pass1」真的在画 =====
+     与上面正交 OBB 完全独立的一路：用引擎当前相机位姿现场构造一个透视视锥体
+     （光心在相机前方 1.2m，沿视线指向 9m 处，fov 50°，16:9），把它作为一条
+     kind='decal' 的注记注入 —— 走的是与用户两次点选完全相同的
+     store.add -> syncDecals -> createInstance -> Pass3 视锥台几何链路。
+     判定口径与正交一致：可见态 / 隐藏态的整屏平均亮度必须出现可测差值。 */
+  console.log('\n===== 透视贴花（视锥体投射）=====');
+  const perspInjected = await E(`(async()=>{const W=${DOC},ed=W.__mgEditor;
+    if(!ed)return 'no-editor';
+    const mod=await import('./editor/schema.js');
+    const cam=W.__viewer?.app?.root?.findComponent?.('camera');
+    const p=cam?.entity?.getPosition?.();const fwd=cam?.entity?.forward;
+    if(!p||!fwd)return 'no-camera';
+    const eye=[p.x+fwd.x*1.2,p.y+fwd.y*1.2,p.z+fwd.z*1.2];
+    const tgt=[p.x+fwd.x*9,p.y+fwd.y*9,p.z+fwd.z*9];
+    const prj=mod.makeFrustumProjector(eye,tgt,{fov:50,aspect:16/9});
+    if(!prj)return 'bad-projector';
+    // 先关掉已有（正交）贴花：两次采样不能有其它贴花混进来
+    for(const a of ed.store.list()) if(a.kind==='decal') ed.store.update(a.id,{visible:false});
+    const tpl=ed.store.list().find(a=>a.kind==='decal');
+    if(!tpl)return 'no-template';
+    const c=JSON.parse(JSON.stringify(tpl));
+    c.id='diag-persp-'+Date.now();c.title='诊断透视贴花';c.kind='decal';
+    c.rect=null;c.surface=null;c.projector=prj;c.points=[eye,tgt];c.visible=true;
+    ed.store.add(c);
+    return JSON.stringify({id:c.id,half:prj.half,fov:prj.fov,near:prj.near,far:prj.far});})()`, 30000);
+  console.log('  注入透视贴花 =', perspInjected);
+  let pi = null; try { pi = JSON.parse(String(perspInjected)); } catch (_) { /* noop */ }
+  if (pi?.id) {
+    await sleep(2200);
+    rows.push(await sample('persp-on'));
+    await E(`(()=>{const W=${DOC},ed=W.__mgEditor;
+      ed.store.update(${JSON.stringify(pi.id)},{visible:false});return 1;})()`);
+    await sleep(1400);
+    rows.push(await sample('persp-off'));
+  }
 
   console.log('\n================ 结论 ================');
   const base = rows.slice(0, 2).filter(r => r.px).map(r => r.px.mean);
@@ -396,10 +454,20 @@ async function main() {
   const demoOk = !dbg || dbg.instances?.every(i => i.demoMode || i.videoReady || i.videoErr === null);
   console.log('  内容源: demoMode/就绪 =', JSON.stringify(dbg?.instances?.map(i => ({ demo: i.demoMode, ready: i.videoReady, err: i.videoErr }))), ' =', demoOk);
 
+  // 透视贴花（视锥体）：同样的 A/B 口径，差值必须可测
+  const pOn = rows.find(r => r.label === 'persp-on')?.px?.mean ?? null;
+  const pOff = rows.find(r => r.label === 'persp-off')?.px?.mean ?? null;
+  const perspDelta = (pOn != null && pOff != null) ? Math.abs(pOn - pOff) : null;
+  const perspOk = !!pi?.id && perspDelta != null && perspDelta >= 0.5;
+  console.log('  透视贴花: 视锥体 =', pi ? `fov=${pi.fov} near=${pi.near} far=${pi.far}` : '未注入',
+    ' 可见态均值 =', pOn?.toFixed(2), ' 隐藏态均值 =', pOff?.toFixed(2),
+    ' 差值 =', perspDelta?.toFixed(2), perspOk ? '(透视投射可见)' : '(透视投射没有画出内容!)');
+
   const fail = blank || collapse || shaderErrors.length > 0 || errors.length > 0 ||
     !editorOk || !toolSelected || !decalCreated || st?.backend !== 'webgpu' ||
-    !pickReadyOk || gpuErrTotal > 0 || !projOk || !demoOk || !guardOk;
+    !pickReadyOk || gpuErrTotal > 0 || !projOk || !demoOk || !guardOk || !perspOk;
   console.log('  贴面矩形结果:', fail ? 'FAIL（黑屏 / shader 错误 / 前置未满足 / GPU 管线异常 / 投射不可见）' : 'PASS');
+  console.log('  透视贴花结果:', perspOk ? 'PASS' : 'FAIL');
   if (st?.backend !== 'webgpu' && !FORCE_GL)
     console.log('  ⚠ 未真正跑在 WebGPU 后端，本次不能证明真机 WGSL 路径；请用支持 Dawn 的环境复测');
 
@@ -407,6 +475,7 @@ async function main() {
     JSON.stringify({ gpuAdapter, baseMean, editorMean, worst, blank, collapse, drift,
       decalDebug: dbg, pageGpuErr, gpuErrTotal, pickReadyOk,
       visAvg, hiddenMean, projDelta, projOk, demoOk, rebuild: rb, guardOk,
+      persp: pi, perspOn: pOn, perspOff: pOff, perspDelta, perspOk,
       shaderErrors, errors, warns, fail, rows }, null, 2));
   console.log(`  report -> tools/diagnose-decal-${FORCE_GL ? 'gl' : 'webgpu'}.json`);
 }

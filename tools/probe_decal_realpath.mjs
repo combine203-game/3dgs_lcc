@@ -55,6 +55,15 @@ const CDP_PORT = 9265;
 const BASE = `http://127.0.0.1:${PORT}`;
 const WAIT = Number((process.argv.find(a => a.startsWith('--wait=')) || '').split('=')[1]) || 20000;
 const HEADED = process.argv.includes('--headed');
+/* --view=floor-1.html 直达目标楼层；--rect=x0,y0,x1,y1 指定用户框选区域。
+   默认保持历史行为（首页 outdoor + 序厅地面矩形），不影响既有验收口径。 */
+const VIEW = (process.argv.find(a => a.startsWith('--view=')) || '').split('=')[1] || '';
+/* --renderer=webgl：强制 PlayCanvas 走 WebGL2。无头 SwiftShader 下 WebGPU
+   （Dawn）在 toDataURL/截图后会报 "Vertex attribute slot 0 ... not present in
+   the VertexState" 并让后续整帧变空白，visible/hidden 差分全部失真。
+   WebGL2 后端无此问题，且贴花 shader 有等价 GLSL 实现。 */
+const RENDERER = (process.argv.find(a => a.startsWith('--renderer=')) || '').split('=')[1] || '';
+const RECT_ARG = (process.argv.find(a => a.startsWith('--rect=')) || '').split('=')[1] || '';
 /* 隐藏模式：'top' = 连顶层展厅页面一起隐藏（历史行为，会连带隐藏展厅的
    canvas/video → 尺寸归零 → 那些 mesh 的 pipeline 失效 → Dawn 报 VertexState 错）；
    'iframe' = 只隐藏 iframe 内的 overlay（保留顶层，避开上述副作用）。 */
@@ -144,6 +153,10 @@ process.on('SIGINT', () => { cleanup(); process.exit(130); });
 let ws, seq = 0;
 const pend = new Map();
 const errors = [];
+/* 必须早于 ws.onmessage 注册：WebGL2 首帧就可能输出 console.error，
+   若此时 errStages 仍在 TDZ，会在事件回调里抛 ReferenceError 直接中断探针。 */
+const stageMark = { name: 'init' };
+const errStages = [];
 
 async function main() {
   for (let i = 0; i < 80; i++) { try { await fetch(BASE + '/'); break; } catch { await sleep(250); } }
@@ -188,13 +201,23 @@ async function main() {
   };
 
   await send('Runtime.enable'); await send('Log.enable'); await send('Page.enable');
-  await send('Page.navigate', { url: BASE + '/' });
+  if (RENDERER === 'webgl') {
+    /* ?renderer=webgl 只作用于顶层文档；楼层页在 iframe 内，app.js 读的是
+       iframe 自己的 URL，拿不到这个参数。用同源 sessionStorage 回退标记
+       在新文档启动前注入，iframe 的 pickRenderer() 就会返回 'webgl'。 */
+    await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: "try{sessionStorage.setItem('mg_fallback','1')}catch(e){}"
+    });
+    console.log('  已注入 sessionStorage.mg_fallback=1（强制 iframe 走 WebGL2）');
+  }
+  let NAV_URL = BASE + '/' + (VIEW ? '?view=' + encodeURIComponent(VIEW) + '&edit=1&nocache=1' : '');
+  if (RENDERER) NAV_URL += (NAV_URL.includes('?') ? '&' : '?') + 'renderer=' + encodeURIComponent(RENDERER);
+  console.log('导航 = ' + NAV_URL);
+  await send('Page.navigate', { url: NAV_URL });
   await sleep(WAIT);
 
   /* 阶段标记：记录每条 console.error 出现在哪个阶段，
      用于把「VertexState 错误」精确定位到是注入贴花、深度反算还是重建触发的。 */
-  const stageMark = { name: 'init' };
-  const errStages = [];
   const DOC_MARK = `(()=>{const f=document.querySelector('iframe.gs-scene-frame[data-active="1"]')||document.querySelector('iframe.gs-scene-frame');return f?f.contentWindow:window;})()`;
   const setStage = async (n) => {
     stageMark.name = n;
@@ -235,6 +258,51 @@ async function main() {
     window.__topHidden?.forEach(([x,v])=>{x.style.visibility=v;});window.__topHidden=null;return 1;})()`;
 
   async function shot(name) {
+    /* --use-dataurl：页面内 canvas.toDataURL 读帧，避开 CDP Page.captureScreenshot
+       触发的引擎 VertexState pipeline 失效（那条错误会让贴花及其它 mesh 一起
+       提交失败、覆盖率恒为 0，且被贴花的全局错误钩子记录）。toDataURL 读的是
+       canvas 后备缓冲，不走合成器，无头下稳定。返回图已是设备像素，
+       _scale = 设备像素/CSS 像素，供 cover.sel 换算。 */
+    if (process.argv.includes('--use-dataurl')) {
+      /* 必须在渲染帧内读：WebGL2 默认 preserveDrawingBuffer=false，帧外
+         toDataURL 拿到的是已清空的缓冲（实测 1258x650 全白 PNG 仅 16KB）。
+         挂一次性 postrender 回调，在引擎刚画完这一帧时取后备缓冲。 */
+      const hooked = await E(`(()=>{const W=${DOC},app=W.__viewer?.app;
+        if(!app)return 'no-app';
+        W.__probeShot=null;
+        app.once('postrender',()=>{
+          const cv=W.document.querySelector('#mg-stage canvas');
+          if(!cv)return;
+          const cr=cv.getBoundingClientRect();
+          W.__probeShot={url:cv.toDataURL('image/png'),
+            bw:cv.width,bh:cv.height,cssW:cr.width,cssH:cr.height};
+        });
+        return 1;})()`);
+      let r = null;
+      for (let i = 0; i < 20 && !r; i++) {
+        r = await E(`(()=>{const W=${DOC};return W.__probeShot||null;})()`);
+        if (!r) await sleep(150);
+      }
+      if (hooked !== 1) console.log('    [shot ' + name + '] postrender 挂载失败 =', JSON.stringify(hooked));
+      if (!r || !r.url || !r.url.startsWith('data:image/png;base64,')) {
+        console.log('    [shot ' + name + '] toDataURL 失败 =', JSON.stringify(r && {
+          bw: r.bw, bh: r.bh,
+          urlType: typeof (r && r.url),
+          urlLen: (r && r.url) ? String(r.url).length : -1,
+          urlHead: (r && r.url) ? String(r.url).slice(0, 48) : '(none)',
+          err: r && r.__err, timeout: r && r.__timeout
+        }));
+        return null;
+      }
+      const buf = Buffer.from(r.url.split(',')[1], 'base64');
+      fs.writeFileSync(path.join(ROOT, 'tools', `probe-real-${name}.png`), buf);
+      const out = decodePng(buf);
+      const scale = r.cssW > 0 ? r.bw / r.cssW : 1;
+      console.log('    [shot ' + name + '] toDataURL canvas=' + out.width + 'x' + out.height +
+        ' CSS=' + Math.round(r.cssW) + 'x' + Math.round(r.cssH) + '  DPR换算=' + scale.toFixed(3));
+      out._scale = scale;
+      return out;
+    }
     const cv = await E(`(()=>{const W=${DOC};
       const cv=W.document.querySelector('#mg-stage canvas');
       if(!cv)return null;const r=cv.getBoundingClientRect();
@@ -252,7 +320,10 @@ async function main() {
        那条错本身与贴花无关，但贴花的全局 GPU 错误钩子会误判成自己的故障并
        把贴花全隐藏（见 diag_decal_attrib 的三组对照）。这里避开视口变更，
        保证差分测量只反映贴花本身。 */
-    const r = await send('Page.captureScreenshot', { format: 'png' });
+    const r = await send('Page.captureScreenshot', {
+      format: 'png',
+      ...(process.argv.includes('--no-from-surface') ? { fromSurface: false } : {})
+    });
     await E(NO_HIDE ? '1' : (HIDE_MODE === 'iframe' ? showDomIframeOnly : showDom));
     const cv2 = await E(`(()=>{const W=${DOC};
       const cv=W.document.querySelector('#mg-stage canvas');
@@ -287,8 +358,11 @@ async function main() {
   console.log('\n===== A. 进入编辑态 =====');
   const backend = await E(`(()=>{const W=${DOC},gd=W.__viewer?.app?.graphicsDevice;
     return gd?(gd.isWebGPU||gd.deviceType==='webgpu'?'webgpu':'webgl2'):null;})()`);
-  await E(`(()=>{document.getElementById('gsEditorBtn')?.click();return 1})()`);
-  await sleep(3000);
+  /* ?view=...&edit=1 已在导航时进入编辑态；此时再点按钮会退出，必须先检查。 */
+  if (!await E(`(()=>!!(${DOC}).__mgEditor)()`)) {
+    await E(`(()=>{document.getElementById('gsEditorBtn')?.click();return 1})()`);
+    await sleep(3000);
+  }
   if (!await E(`(()=>!!(${DOC}).__mgEditor)()`)) throw new Error('编辑器未挂载');
   console.log('  后端 =', backend);
   await setStage('A-编辑器已挂载');
@@ -296,7 +370,8 @@ async function main() {
   console.log('\n===== B. 走真实路径：在场景表面框选 → 深度反算 → OBB 拟合 =====');
   /* 框选区域：取画布中央偏左的一块（序厅地面区域），UV 直接给 editor 的 rect。
      真实用户是用鼠标拖框，这里等价地写入同一条数据通路（a.rect → rebuildDecalProjector）。 */
-  const SEL_RECT = [0.34, 0.52, 0.56, 0.72];
+  const SEL_RECT = RECT_ARG ? RECT_ARG.split(',').map(Number) : [0.34, 0.52, 0.56, 0.72];
+  if (SEL_RECT.length !== 4 || SEL_RECT.some(v => !Number.isFinite(v))) throw new Error('--rect 格式应为 x0,y0,x1,y1');
   const setup = await E(`(()=>{const W=${DOC},ed=W.__mgEditor;
     const list=ed.store.list();
     for(const a of list){if(a.kind==='decal'&&a.visible!==false)ed.store.update(a.id,{visible:false});}
@@ -346,7 +421,7 @@ async function main() {
     // 直接手动跑一次深度反算，看 picker 是否能取到表面
     const manual = await E(`(()=>{const W=${DOC},ed=W.__mgEditor;
       const pk=ed.picker;if(!pk)return 'no-picker';
-      return pk.unprojectRect(${JSON.stringify(SEL_RECT)},6,6,{pickTimeout:4000}).then(g=>
+      return pk.unprojectRect(${JSON.stringify(SEL_RECT)},6,6,{pickTimeout:800}).then(g=>
         g?{source:g.source,samples:g.samples,stats:g.stats,
              pts:(g.points||[]).filter(Boolean).length}:null).catch(e=>'err:'+e);})()`);
     console.log('  手动 unprojectRect =', JSON.stringify(manual));
@@ -355,14 +430,42 @@ async function main() {
   console.log('  投影机 =', JSON.stringify(proj));
   await setStage('B3-投影机已生成');
   await sleep(2000);
+  /* --debug-mode=N：把贴花 shader 切成调试输出（1=深度灰度,2=失败分类着色），
+     这样可见帧里贴花命中区会显示纯色而非视频，差分能直接证明 shader 是否在
+     框选区产出片元，排除「视频 alpha / 截图归因」等干扰。 */
+  const DEBUG_MODE = Number((process.argv.find(a => a.startsWith('--debug-mode=')) || '').split('=')[1]);
   // 打开显示：贴花开始真正参与绘制
   await E(`(()=>{const W=${DOC},ed=W.__mgEditor;ed.store.update('${DECAL_ID}',{visible:true});return 1;})()`);
+  /* A/B 开关：强制关掉 shadow 分支，走旧 OBB 回退路径。用于判定 GPU 错误
+     是「新 shader 分支」引起，还是「新建 ShaderMaterial/纹理」本身引起。 */
+  if (process.argv.includes('--force-legacy')) {
+    await E(`(()=>{const W=${DOC},m=W.__mgEditor.decalMgr;m.instances.forEach(i=>{i.shadow=null;});return 1;})()`);
+    await setStage('B4a-强制 shadow=0 回退旧OBB');
+  }
   await setStage('B4-已置 visible=true');
   await sleep(3000);
+  if (Number.isFinite(DEBUG_MODE)) {
+    /* 等实例稳定后再写：store.update(visible) 触发的 syncDecals 可能异步
+       重建实例，提前写入会被重置为 options 默认 0。setOptions 不触发已有
+       实例 sync，必须直接写 inst.debugMode 并轮询确认。 */
+    for (let k = 0; k < 6; k++) {
+      await E(`(()=>{const W=${DOC},m=W.__mgEditor?.decalMgr;
+        if(m&&m.instances&&m.instances.forEach)m.instances.forEach(i=>{i.debugMode=${DEBUG_MODE};});
+        return 1;})()`);
+      await sleep(500);
+      const d = await dbg();
+      if (d?.instances?.[0]?.debugMode === DEBUG_MODE) break;
+    }
+    console.log('  shader debugMode =', (await dbg())?.instances?.[0]?.debugMode);
+  }
   const dbgPost = await dbg();
   console.log('  重建后诊断 =', JSON.stringify({
     degraded: dbgPost?.degraded, gpuErrors: dbgPost?.gpuErrors,
-    instanceCount: dbgPost?.instances?.length
+    scopedErrors: dbgPost?.scopedErrors, foreignErrors: dbgPost?.foreignErrors,
+    lastGpuError: dbgPost?.lastGpuError,
+    pickReady: dbgPost?.pickReady, pickSize: dbgPost?.pickSize,
+    instanceCount: dbgPost?.instances?.length,
+    instances: dbgPost?.instances
   }));
   // 立即裸截一张（不隐藏 DOM、不裁剪）：用来判断错误是不是由 hideDom/截图触发
   if (process.argv.includes('--probe-rawshot')) {
@@ -378,7 +481,7 @@ async function main() {
   const surface = await E(`(()=>{const W=${DOC},ed=W.__mgEditor;const a=ed.store.get('${DECAL_ID}');
     const s=a&&a.surface;if(!s)return null;
     return {source:s.source,samples:s.samples,stats:s.stats,
-            pts:(s.points||[]).filter(Boolean).slice(0,4)};})()`);
+            pts:(s.points||[]).filter(Boolean)};})()`);
   console.log('  深度反算 =', JSON.stringify(surface));
 
   for (let i = 0; i < 40; i++) {
@@ -598,8 +701,26 @@ async function main() {
   const dbgInfo = await dbg();
   console.log('  渲染诊断 =', JSON.stringify({
     degraded: dbgInfo?.degraded, gpuErrors: dbgInfo?.gpuErrors,
-    pickReady: dbgInfo?.pickReady, demoMode: dbgInfo?.demoMode
+    scopedErrors: dbgInfo?.scopedErrors, foreignErrors: dbgInfo?.foreignErrors,
+    pickReady: dbgInfo?.pickReady, pickSize: dbgInfo?.pickSize,
+    demoMode: dbgInfo?.demoMode, instances: dbgInfo?.instances
   }));
+  /* GPU 侧 uniform 快照：JS 侧 debug() 的 pickReady=true 只说明 CPU 标记，
+     不等于 shader uniform 真的被 onPrerender 注入。WebGL2 下若 uPickReady
+     仍为初值 0，shader 首行 discard 会让 quad 完全不产出片元。 */
+  const uni = await E(`(()=>{const W=${DOC},m=W.__mgEditor?.decalMgr;
+    const it=m&&m.instances&&m.instances.values().next().value;
+    if(!it||!it.material)return null;
+    const p=it.material.parameters;
+    const get=k=>{let v=p instanceof Map?p.get(k):p?.[k];
+      if(!v)return null;
+      const d=v.data!==undefined?v.data:(v.value!==undefined?v.value:null);
+      return ArrayBuffer.isView(d)?Array.from(d):d;};
+    return {pickReady:get('uPickReady'),uResolution:get('uResolution'),
+      uDebugMode:get('uDebugMode'),uShadowReady:get('uShadowReady'),
+      uPickSize:get('uPickSize'),uUVSignY:get('uUVSignY'),
+      paramCount:p instanceof Map?p.size:Object.keys(p||{}).length};})()`);
+  console.log('  GPU uniform 快照 =', JSON.stringify(uni));
   if (errors.length) {
     console.log('\n  页面错误（按阶段）：');
     errors.slice(0, 8).forEach((e, i) => {

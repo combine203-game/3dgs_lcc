@@ -21,6 +21,11 @@ export const KINDS = {
   // 世界表面点，得到贴合真实可见几何的网格，像纹理/decal 一样贴住模型。
   // 两个 world 点只是兼容字段（拾取 / 定位），真正几何来自 surface。
   decal:   { label: '贴面矩形', icon: '▦', min: 2, max: 2,       closed: true  },
+  // 透视贴花：在场景里交互布设**透视相机的视锥体**（第一次点击 = 光心，
+  // 第二次点击 = 指向目标），用该视锥做透视投影贴花。
+  // 数据仍然落成 kind='decal'（projector.mode='persp'），这样渲染 / 显隐 /
+  // 导入导出 / 视频源等既有链路全部复用，不需要第二套贴花实现。
+  frustum: { label: '透视贴花', icon: '⌾', min: 2, max: 2,       closed: true  },
   measure: { label: '测量',     icon: '↔', min: 2, max: 2,       closed: false },
 };
 
@@ -33,8 +38,14 @@ export const TOOLS = [
   // 快捷键刻意避开 W/A/S/D（漫游键）：用 N 表示 eNtity screen
   { id: 'screen',  label: '三维屏', key: 'N', icon: '▣' },
   { id: 'decal',   label: '贴面矩形', key: 'R', icon: '▦' },
+  // F = Frustum：透视贴花（交互布设透视相机视锥体）
+  { id: 'frustum', label: '透视贴花', key: 'F', icon: '⌾' },
   { id: 'measure', label: '测量',   key: 'M', icon: '↔' },
 ];
+
+/** 投影机工作模式：ortho = 正交 OBB（贴面矩形，深度反算后建盒）
+ *  persp = 透视视锥体（光心 + 朝向 + fov/aspect/near/far） */
+export const PROJECTOR_MODES = ['ortho', 'persp'];
 
 /** 展板内容形态：纯文字 / 图片 / 网页 / 视频 */
 export const MEDIA_TYPES = [
@@ -616,6 +627,67 @@ export function buildDecalProjector(grid, opts = {}) {
   };
 }
 
+/**
+ * 【shadowmap 贴花】由投影机 OBB 构造正交虚拟相机，并对碰撞 mesh 投射一张深度图。
+ *
+ * 原理与 shadow map 完全一致：虚拟相机（正交，视锥 = OBB 的 XY 范围，沿 -normal 看进去）
+ * 渲一张「从投影机视角看到的表面深度」。渲染阶段把主相机像素反投影到世界点 W，
+ * 变换到虚拟相机空间得到 (u,v,d)，若 d 与深度图 D(u,v) 接近 —— 说明 W 正是投影机
+ * 看到的那一层表面 → 在投射范围内 → 用 (u,v) 采样视频。
+ *
+ * 相比旧的「全屏逐像素 52 值深度排序 + OBB 盒判定」：
+ *   - 深度图是碰撞 mesh 的确定性几何（非 stochastic），零排序、零逐帧抖动；
+ *   - 投射范围由视锥 [0,1]² + 深度比较精确界定，跨越多个不共面表面也不会整片乱贴；
+ *   - 深度图只在 projector 变化时算一次（静态场景），每帧热路径只剩纹理采样。
+ *
+ * @param {object} projector buildDecalProjector 的输出 {position, quaternion, half}
+ * @param {function} raycast (ox,oy,oz,dx,dy,dz,maxDist) => [x,y,z]|null，沿给定射线求最近表面
+ * @param {object} [opts] { n?:number 深度图边长(默认24), margin?:number }
+ * @returns {object|null} { n, size, depth:Float32Array, vcam, right, up, normal, far }
+ */
+export function buildShadowDepthMap(projector, raycast, opts = {}) {
+  if (!projector || typeof raycast !== 'function') return null;
+  const { position, quaternion, half } = projector;
+  if (!Array.isArray(position) || !Array.isArray(quaternion) || !Array.isArray(half) ||
+      !position.every(Number.isFinite) || !quaternion.every(Number.isFinite) ||
+      !half.every(h => Number.isFinite(h) && h > 0)) return null;
+  const n = Math.max(8, Math.min(64, Math.round(Number(opts.n) || 24)));
+  const margin = Math.max(0.05, Number(opts.margin) || 0.35);
+  const right = rotateByQuat([1, 0, 0], quaternion);
+  const up = rotateByQuat([0, 1, 0], quaternion);
+  const normal = rotateByQuat([0, 0, 1], quaternion);
+  // 虚拟相机退到 OBB 前表面之外，沿 -normal 看进去；far 覆盖整盒厚度
+  const camOff = half[2] + margin;
+  const far = 2 * half[2] + 2 * margin + 2;
+  const vcam = [
+    position[0] + normal[0] * camOff,
+    position[1] + normal[1] * camOff,
+    position[2] + normal[2] * camOff
+  ];
+  const dir = [-normal[0], -normal[1], -normal[2]];
+  const depth = new Float32Array(n * n).fill(1.0); // 1.0 = 未命中 / 空
+  let hit = 0;
+  for (let j = 0; j < n; j++) {
+    const vv = (j + 0.5) / n * 2 - 1;
+    for (let i = 0; i < n; i++) {
+      const uu = (i + 0.5) / n * 2 - 1;
+      const ox = vcam[0] + right[0] * uu * half[0] + up[0] * vv * half[1];
+      const oy = vcam[1] + right[1] * uu * half[0] + up[1] * vv * half[1];
+      const oz = vcam[2] + right[2] * uu * half[0] + up[2] * vv * half[1];
+      const p = raycast(ox, oy, oz, dir[0], dir[1], dir[2], far + 2);
+      if (!p || !p.every(Number.isFinite)) continue;
+      const d = Math.hypot(p[0] - ox, p[1] - oy, p[2] - oz);
+      depth[j * n + i] = Math.max(0, Math.min(1, d / far));
+      hit++;
+    }
+  }
+  if (!hit) return null;
+  /* 用普通数组返回，而不是 Float32Array：标注文档要经 JSON.stringify 落
+     localStorage，Float32Array 会变成 {"0":..,"1":..} 对象，刷新后上传纹理失败
+     （表现为「第一次能贴，刷新后只有框线没视频」）。 */
+  return { n, size: [n, n], depth: Array.from(depth), vcam, right, up, normal, far, hits: hit };
+}
+
 /** 投影机 OBB 的 8 个世界角点（用于编辑器线框 / 手柄） */
 export function projectorOBBCorners(projector) {
   if (!projector || !Array.isArray(projector.half) || !Array.isArray(projector.quaternion) || !Array.isArray(projector.position)) return null;
@@ -626,6 +698,129 @@ export function projectorOBBCorners(projector) {
     out.push([r[0] + position[0], r[1] + position[1], r[2] + position[2]]);
   }
   return out; // 顺序：x,y,z 各 ±，索引 = ((sx+1)/2)*4 + ((sy+1)/2)*2 + ((sz+1)/2)
+}
+
+/* ==========================================================================
+ * 透视投影机（透视相机视锥体）
+ *
+ * 正交 OBB 与透视视锥体共用同一个 projector 结构，靠 `mode` 区分：
+ *   mode='ortho'（默认 / 旧数据）：position = 盒心，quaternion 局部 +Z 为投射方向，
+ *                                  half = OBB 三轴半尺寸。
+ *   mode='persp'：position = 光心（eye，用户第一次点击落点），quaternion 局部 +Z
+ *                 为光轴，half = [远平面半宽, 远平面半高, 远距]，
+ *                 另带 near / far / fov（竖直，度）/ aspect。
+ *
+ * 为什么 half 用「远平面处」的尺寸而不是 fov：
+ *   · 视锥台在 z = far 处的截面尺寸正好等于 OBB 的 half[0..1]，于是
+ *     shader 里那句 `uvProj = ln.xy * 0.5 + 0.5` 完全不用改；
+ *   · 体几何（Pass3 立方体 / 编辑器线框）只需把 8 个角点按 z 的比例缩放，
+ *     顶点顺序与 OBB 逐位一致 —— 也就是说 Pass3 的索引缓冲、Overlay 的
+ *     12 条边连线、6 个拖拽手柄全部原样复用。
+ * ========================================================================== */
+
+const clampNum = (v, lo, hi, dflt) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : dflt;
+};
+
+/**
+ * 由「光心 + 指向目标」构造透视投影机（用户两次点击即可布设视锥体）。
+ * @param {number[]} eye    光心世界坐标
+ * @param {number[]} target 光轴指向的世界点
+ * @param {object} [opts]   { fov?:number(度,竖直), aspect?:number, far?:number, near?:number }
+ * @returns {object|null}   { mode:'persp', position, quaternion, half, depth, near, far, fov, aspect }
+ */
+export function makeFrustumProjector(eye, target, opts = {}) {
+  if (!Array.isArray(eye) || !Array.isArray(target) || eye.length < 3 || target.length < 3) return null;
+  const ex = [Number(eye[0]), Number(eye[1]), Number(eye[2])];
+  const tg = [Number(target[0]), Number(target[1]), Number(target[2])];
+  if (!ex.every(Number.isFinite) || !tg.every(Number.isFinite)) return null;
+  const dir = [tg[0] - ex[0], tg[1] - ex[1], tg[2] - ex[2]];
+  const len = Math.hypot(dir[0], dir[1], dir[2]);
+  if (!(len > 0.05)) return null;                     // 两点重合：朝向不确定
+  const fwd = vunit(dir);
+  /* 竖直参考：视线越接近竖直，世界 +Y 越不可用（cross 退化）。
+     阈值取 0.98（≈11°），退化时换 +Z 作参考，保证基永远可解。 */
+  let upRef = Math.abs(fwd[1]) > 0.98 ? [0, 0, 1] : [0, 1, 0];
+  let up = vunit([
+    upRef[0] - fwd[0] * vdot(upRef, fwd),
+    upRef[1] - fwd[1] * vdot(upRef, fwd),
+    upRef[2] - fwd[2] * vdot(upRef, fwd)
+  ]);
+  if (!Number.isFinite(up[0]) || vdot(up, up) < 1e-6) {
+    upRef = Math.abs(fwd[2]) > 0.98 ? [1, 0, 0] : [0, 0, 1];
+    up = vunit([
+      upRef[0] - fwd[0] * vdot(upRef, fwd),
+      upRef[1] - fwd[1] * vdot(upRef, fwd),
+      upRef[2] - fwd[2] * vdot(upRef, fwd)
+    ]);
+  }
+  // 右手系：X = up × Z，Y = Z × X
+  const right = vunit(vcross(up, fwd));
+  up = vunit(vcross(fwd, right));
+  const far = clampNum(opts.far, 0.3, 200, len);
+  const fov = clampNum(opts.fov, 8, 150, 45);
+  const aspect = clampNum(opts.aspect, 0.2, 8, 16 / 9);
+  const near = clampNum(opts.near, 0.02, far * 0.6, Math.max(0.05, far * 0.02));
+  return retuneFrustumProjector({
+    mode: 'persp',
+    position: ex,
+    quaternion: quatFromBasis(right, up, fwd),
+    half: [1, 1, far],
+    depth: far * 2
+  }, { fov, aspect, far, near });
+}
+
+/**
+ * 按 fov / aspect / far / near 重算 half，位置与朝向保持不变。
+ * 面板改参数、拖拽手柄缩放都走这里，保证 half 与 fov 永远自洽。
+ */
+export function retuneFrustumProjector(projector, opts = {}) {
+  if (!projector || !Array.isArray(projector.half)) return null;
+  const far = clampNum(opts.far, 0.3, 200,
+    Number.isFinite(Number(projector.far)) ? Number(projector.far) : Number(projector.half[2]) || 5);
+  const fov = clampNum(opts.fov, 8, 150,
+    Number.isFinite(Number(projector.fov)) ? Number(projector.fov) : 45);
+  const aspect = clampNum(opts.aspect, 0.2, 8,
+    Number.isFinite(Number(projector.aspect)) ? Number(projector.aspect)
+      : (projector.half[1] > 0 ? projector.half[0] / projector.half[1] : 16 / 9));
+  const near = clampNum(opts.near, 0.02, far * 0.6,
+    Number.isFinite(Number(projector.near)) ? Number(projector.near) : Math.max(0.05, far * 0.02));
+  const halfY = far * Math.tan((fov * Math.PI) / 360);
+  const halfX = halfY * aspect;
+  return {
+    ...projector,
+    mode: 'persp',
+    half: [Math.max(0.01, halfX), Math.max(0.01, halfY), far],
+    depth: far * 2,
+    near, far, fov, aspect
+  };
+}
+
+/**
+ * 投影机体积的 8 个世界角点。
+ * **顶点顺序与 projectorOBBCorners 完全一致**（索引 = ix*4 + iy*2 + iz，z 变化最快），
+ * 因此 Pass3 立方体索引缓冲、Overlay 的 12 条边、6 个手柄都能直接复用。
+ * ortho → OBB；persp → 视锥台（iz=0 近平面四点，iz=1 远平面四点）。
+ */
+export function projectorVolumeCorners(projector) {
+  if (!projector || projector.mode !== 'persp') return projectorOBBCorners(projector);
+  const { position, quaternion, half } = projector;
+  if (!Array.isArray(position) || !Array.isArray(quaternion) || !Array.isArray(half)) return null;
+  const far = Math.max(0.1, Number(half[2]) || 1);
+  const near = clampNum(projector.near, 0.01, far * 0.95, Math.max(0.05, far * 0.02));
+  const out = [];
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      for (const sz of [0, 1]) {
+        const z = sz ? far : near;
+        const k = z / far;                     // 截面按距离线性缩放 = 透视
+        const r = rotateByQuat([sx * half[0] * k, sy * half[1] * k, z], quaternion);
+        out.push([r[0] + position[0], r[1] + position[1], r[2] + position[2]]);
+      }
+    }
+  }
+  return out;
 }
 
 /** 三维实体屏的世界空间四角 + 局部坐标系。

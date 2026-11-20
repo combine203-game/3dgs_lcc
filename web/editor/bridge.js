@@ -22,6 +22,16 @@ function post(type, extra = {}) {
   try { parent.postMessage({ type, ...extra }, '*'); } catch (_) { /* 跨域兜底 */ }
 }
 
+/** 编辑态开合的文档内广播。
+ *  浏览态标注层（browse-annotations.js）复用编辑器 Overlay 渲染，产出同前缀
+ *  `.ed-item` / `.ed-g` DOM；而编辑器的回归断言假设这些节点只由编辑器产生，
+ *  所以必须在「类名切换的同一任务内」同步销毁 / 重建浏览层，不能等下一帧。 */
+function dispatchMode(on) {
+  try {
+    document.dispatchEvent(new CustomEvent(on ? 'mg-editor-on' : 'mg-editor-off'));
+  } catch (_) { /* 老浏览器无 CustomEvent 构造器时忽略 */ }
+}
+
 // 用 import.meta.url 明确解析模块路径；editor.js 不再反向 import 本模块，
 // 因此模块图无环，动态导入不会在「模块求值中」时序下挂起。
 const EDITOR_URL = new URL('./editor.js', import.meta.url).href;
@@ -77,6 +87,7 @@ async function mount(msg = {}) {
   stage = 'start';
   marks.enterAt = performance.now();
   document.documentElement.classList.add('mg-editor-on');
+  dispatchMode(true);                      // 同步撤掉浏览态标注层，避免 DOM 撞车
   // 让出主线程：模块求值 + 编辑器 UI 构建期间暂缓绘制
   pauseRender();
   try {
@@ -104,6 +115,7 @@ async function mount(msg = {}) {
     resumeRender();
     stage = 'error: ' + String(err?.message ?? err);
     document.documentElement.classList.remove('mg-editor-on');
+    dispatchMode(false);                   // 挂载失败也要把浏览态标注层还回去
     console.error('[editor-bridge] 挂载失败', err);
     post('mg-editor-mounted', { ok: false, error: String(err?.message ?? err) });
   } finally {
@@ -121,6 +133,7 @@ function unmount() {
   api = null;
   mounted = false;
   document.documentElement.classList.remove('mg-editor-on');
+  dispatchMode(false);                     // 重读 localStorage，把刚编辑的标注显示出来
   post('mg-editor-unmounted');
 }
 

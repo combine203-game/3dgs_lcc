@@ -693,6 +693,45 @@ HUD 在编辑态被 CSS 撤掉，基线不可比）、用 `postrender` 计数证
 `gl.COLOR_CLEAR_VALUE` / `FRAMEBUFFER_BINDING`、捕获 JS 异常与守卫 `console.warn`
 （并自检 iframe warn 捕获通道）。
 
+### 第五次勘误：三段式 shadow-map 深度比较把贴花整块丢光（2026-11-20）
+
+表象：`diagnose_decal_repro` 的 `projDelta = 0`，可见态与隐藏态均值完全相同
+（92.46 / 92.46），即「只有包围盒、画面里没有任何视频」。
+
+取证与真因（三步定位，均有截图/日志）：
+
+1. 对照实验 `DECAL_SHADOW=0`（等价 `?shadowPass=0`）→ 投射立刻恢复，差值 6.57
+   ⇒ 故障完全来自 shadow-map 三段式，与 OBB / 视频纹理 / 深度反算无关。
+2. 给 shadow FS 加诊断探针 `uDebugMode=2`：**蓝 = 投影 UV 越界，品红 = Pass1
+   深度图为空，绿 = 有深度**。截图整片品红 ⇒ `shadowSurfaceDepth() = 1.0`。
+3. 读实现：Pass1 用引擎自带 `RenderPassPicker` + 正交相机渲染 World 层 splat。
+   但本构建主画面已由自定义高斯渲染器接管（引擎 gsplat `meshInstance` 被隐藏），
+   pick 通道渲不出任何 splat ⇒ 深度纹理只有清屏色 ⇒ shader 里
+   `mapD >= 0.999999 → discard` 把每一个像素都丢掉。
+
+附带发现的两个同源缺陷：
+
+- 碰撞 mesh 回退写的是 **D32 深度纹理**，而 Pass3 的 FS 按 **RGBA16F 四通道
+  伯努利试验 + 3×3 邻域 30% 分位** 解码 —— 两种口径混用，要么 `mapD≈0` 全丢，
+  要么 WebGPU 深度纹理绑到 `texture_2d<f32>` 触发 pipeline 校验失败。
+- `debug()` 的 `shadowReady` 只看旧 CPU 深度图字段，新三段式恒为 `false`，真机
+  排查会被误读成「深度图没就绪」。
+- 诊断探针初版在 WGSL 里写了 C 风格三元 `?:`（WGSL 非法）→ Invalid RenderPipeline，
+  被 fail-safe 判为贴花自身错误而整体降级；改用 `select(falseValue, trueValue, cond)`。
+
+修复（默认回到可工作路径，坏分支显式禁用）：
+
+| 项 | 修复 |
+|---|---|
+| 默认投影方式 | `depthTest` 默认 **0** → always-on-top：UV 走 OBB 局部坐标，视频在投影盒内无条件显示（Pass3 立方体几何仍启用） |
+| 深度比较 | 保留为显式可选：`?depthTest=1` / `sessionStorage.mg_decal_depth='1'` / `setOptions({depthTest:1})`，仅在引擎自带 splat pick 可用的构建里成立 |
+| 碰撞 mesh 深度回退 | **禁用**并告警一次：D32 与 RGBA16F 试验口径不兼容，不再假装支持 |
+| 诊断字段 | `shadowReady` 统一为「新路径看 depthPassOk+shadowTex、旧路径看 CPU 深度图」，并暴露 `depthTestOption` |
+| 调参下沉 | `setOptions({debugMode/boxScale/depthMode/videoFlipY/cull/...})` 立即写进已有实例，探针不再「看起来没输出」 |
+
+验证：同一脚本默认参数下 `projDelta = 7.46`（可见 99.92 / 隐藏 92.46）、
+`pickReady=true`、`degraded=false`、GPU 错误 0、`贴面矩形结果: PASS`。
+
 **验证结果（同一脚本、同机前后对比）**：
 
 | 指标 | 修复前 | 修复后 |

@@ -18,8 +18,9 @@
  *     反馈，感觉就是「点线面没画出来」。
  */
 import { distance, pathLength, polygonArea, arrowChainWorld,
-  BOARD_BASE_PX, screenCorners, homographyMatrix3d, decalFrame, decalGridPoints,
-  projectorOBBCorners, rotateByQuat } from './schema.js';
+  BOARD_BASE_PX, screenCorners, homographyMatrix3d,
+  projectorOBBCorners, projectorVolumeCorners, makeFrustumProjector,
+  retuneFrustumProjector, rotateByQuat } from './schema.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 /** 展板悬浮于锚点上方的导引线长度（屏幕 px） */
@@ -53,7 +54,7 @@ function setText(node, txt) {
 export class Overlay {
   constructor({ host, getViewer, store, getScene, getSelected, getSelectedSet, onPick, isPreview, alwaysVisible,
     onBoardMove, onBoardResize, onBoardAnchor, onScreenMove, isEditable, isLocked,
-    drapeLine, drapeQuad, isOccluded, drapeVersion }) {
+    drapeLine, drapeQuad, isOccluded, drapeVersion, showDecalGuides }) {
     this.host = host;
     this.getViewer = getViewer;
     this.store = store;
@@ -81,6 +82,10 @@ export class Overlay {
     this.drapeQuad = drapeQuad || null;
     this.isOccluded = isOccluded || null;
     this.drapeVersion = drapeVersion || (() => 0);
+    /* 贴花辅助线框（OBB / 视锥台 12 条棱 + 拖拽手柄 + 占位框 + 标签）是否绘制。
+       编辑态必须画（要拖拽、要看清体积）；浏览态只显示 GPU 投射的视频，
+       线框属于编辑辅助，必须隐藏 —— 否则观众会在画面上看到一圈「铁丝网」。 */
+    this.showDecalGuides = showDecalGuides || (() => true);
 
     this.layer = div('ed-layer');
     this.svg = svg('svg', { class: 'ed-svg' });
@@ -170,8 +175,12 @@ export class Overlay {
       if (a.depthTest && this.isOccluded &&
           this._occludePoints(a).every(p => this.isOccluded(p))) { this._hide(a.id); continue; }
       const pts = a.points.map(p => this._project(ctx, p));
-      // 贴面矩形的几何来自深度反算网格，两个兼容锚点偶尔落到相机背后也不该整块消失
-      const hasSurface = a.kind === 'decal' && Array.isArray(a.surface?.points) && a.surface.points.length > 3;
+      // 贴面矩形的几何来自深度反算网格，两个兼容锚点偶尔落到相机背后也不该整块消失。
+      // 透视贴花同理：几何完全由 projector（视锥体）决定，而「光心」锚点恰恰经常
+      // 就贴在相机附近甚至身后 —— 绝不能因此把整条贴花判成"不可见"。
+      const hasSurface = a.kind === 'decal' &&
+        (a.projector?.mode === 'persp' ||
+          (Array.isArray(a.surface?.points) && a.surface.points.length > 3));
       if (pts.some(p => !p) && !hasSurface) { this._hide(a.id); continue; }
       const isSel = selSet.includes(a.id);
       const locked = !isSel && this.isLocked(a.id);
@@ -224,6 +233,9 @@ export class Overlay {
       const size = a.style.size || { w: 1.8, h: 1.35 };
       const geo = screenCorners(a.points[0], size, a.style.yaw, a.style.pitch);
       pts = geo.corners;
+    } else if (a.kind === 'decal' && a.projector?.mode === 'persp') {
+      // 透视贴花没有 surface 网格：用视锥体 8 角点做包围盒（框选 / 对齐吸附才准）
+      pts = projectorVolumeCorners(a.projector) || pts;
     } else if (a.kind === 'decal' && Array.isArray(a.surface?.points) && a.surface.points.length) {
       pts = a.surface.points;
     }
@@ -972,149 +984,86 @@ export class Overlay {
     const n = this._node(a, 'g');
     const el = this._node(a, 'el').el;
     const c = c_of(a);
-    const U0 = Math.max(1, Math.min(24, Math.round(Number(a.style.decalGrid) || 8)));
 
-    if (!n.parts.decal) n.parts.decal = { sig: null, grid: null, cellG: null, cells: [], outline: null, label: null, dom: null };
+    if (!n.parts.decal) n.parts.decal = { sig: null, grid: null, cellG: null, cells: [], outline: null, label: null, dom: null, pending: null };
     const dc = n.parts.decal;
+
+    /* 浏览态（showDecalGuides=false）：贴花的画面完全由 GPU 投射的视频负责，
+       这里把所有编辑辅助图形收起来，只留一个空 <g>（保留 data-id 供诊断 /
+       图层树计数），不产生任何线框 / 手柄 / 占位框。 */
+    if (!this.showDecalGuides()) return this._hideDecalGuides(n, el, dc);
+    n.g.style.display = '';
 
     // 新实现：投影式延迟贴花（projector OBB）——画 OBB 线框 + 手柄，不再画 81 网格 / 单应视频 DOM
     if (a.projector) return this._drawDecalProjector(a, selected, ctx, locked, n, el, c, dc);
     // 旧 surface 路径：隐藏可能残留的 OBB 元素
     this._hideDecalOBB(n);
 
-    const s = a.surface;
-    const hasSurface = !!(s && Array.isArray(s.points) && s.points.length >= 4 &&
-      Number.isFinite(s.nu) && Number.isFinite(s.nv));
-    let g;
-    if (hasSurface) {
-      // 深度反算结果已是世界坐标，与相机 / MESH 版本无关，直接投影即可
-      g = { points: s.points, nu: s.nu, nv: s.nv };
-      dc.sig = null;
-    } else {
-      // 兼容旧数据：切平面网格 + 逐点吸附（drapeQuad 已修掉天花板误吸）
-      const frame = decalFrame(a.points, a.style.normal || [0, 1, 0]);
-      const lift = Number(a.style.decalLift ?? 0.02);
-      const sig = JSON.stringify(a.points) + '|' + JSON.stringify(frame.normal) +
-        '|' + U0 + '|' + lift + '|' + this.drapeVersion();
-      if (dc.sig !== sig) {
-        dc.sig = sig;
-        dc.grid = this.drapeQuad
-          ? this.drapeQuad(frame, U0, U0, lift)
-          : decalGridPoints(frame, U0, U0);
-      }
-      g = dc.grid;
-    }
-    const idx = (i, j) => j * (g.nu + 1) + i;
-    const proj = g.points.map(p => this._project(ctx, p));
+    /* 【旧 surface 网格多边形路径已彻底移除】
+       历史实现把 49 个深度反算世界点铺成 8×8 网格，构建 64 个填充多边形
+       (.ed-decal-cell) + 外轮廓 + 四点单应视频 DOM。这条路径在掠射角 / 近裁剪面
+       下个别世界点的投影坐标会爆炸，四边形被拉成细长尖刺 —— 正是曾出现的
+       「奇异多边形」根因。现行技术路线是 projector OBB + GPU 逐像素投射，
+       编辑器只需画 OBB 线框，不再构建任何世界空间网格多边形。
+       没有 projector 时（投影机异步生成失败 / 旧文档）只画屏幕空间占位框：
+       坐标直接取自 a.rect（归一化屏幕矩形），完全不经过世界点投影，从根上
+       杜绝尖刺；surface 世界点数据仍保留（深度反算链路依赖它），只是不再画网格。 */
+    this._hideDecalOBB(n);
+    return this._drawDecalPending(a, selected, ctx, locked, n, el, c, dc);
+  }
 
-    // ---------- SVG 网格：每个格子独立投影，随 MESH 起伏 ----------
-    if (!dc.cellG) { dc.cellG = svg('g', { class: 'ed-decal-cells' }); n.g.appendChild(dc.cellG); }
-    if (!dc.outline) { dc.outline = svg('polygon', { class: 'ed-decal-outline' }); n.g.appendChild(dc.outline); }
-    if (!dc.label) { dc.label = svg('text', { class: 'ed-decal-label' }); n.g.appendChild(dc.label); }
-    const need = g.nu * g.nv;
-    while (dc.cells.length < need) {
-      const cell = svg('polygon', { class: 'ed-decal-cell' });
-      dc.cellG.appendChild(cell); dc.cells.push(cell);
-    }
-    let cellDrawn = 0;
-    let k = 0;
-    for (let j = 0; j < g.nv; j++) {
-      for (let i = 0; i < g.nu; i++) {
-        const cell = dc.cells[k++];
-        const q = [proj[idx(i, j)], proj[idx(i + 1, j)], proj[idx(i + 1, j + 1)], proj[idx(i, j + 1)]];
-        if (q.some(p => !p)) { cell.style.display = 'none'; continue; }
-        cell.style.display = '';
-        cell.style.pointerEvents = locked ? 'none' : 'all';
-        cell.setAttribute('points', q.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '));
-        cellDrawn++;
-      }
-    }
-    for (let i = k; i < dc.cells.length; i++) dc.cells[i].style.display = 'none';
+  /** 无 projector 的贴面矩形：只画基于 a.rect 的屏幕空间虚线占位框 + 提示标签。
+   *  四个角点直接由归一化屏幕矩形换算，不做任何世界点投影，永不产生退化多边形。 */
+  _drawDecalPending(a, selected, ctx, locked, n, el, c, dc) {
+    if (dc.cellG) dc.cellG.style.display = 'none';
+    if (dc.outline) dc.outline.style.display = 'none';
+    if (dc.dom && dc.dom.video) { const p = dc.dom.video.parentElement; if (p) p.style.display = 'none'; }
+    el.style.display = 'none';
 
-    // 边界轮廓沿网格外圈走，能看出矩形真正贴在起伏表面上
-    const border = [];
-    for (let i = 0; i <= g.nu; i++) border.push(proj[idx(i, 0)]);
-    for (let j = 1; j <= g.nv; j++) border.push(proj[idx(g.nu, j)]);
-    for (let i = g.nu - 1; i >= 0; i--) border.push(proj[idx(i, g.nv)]);
-    for (let j = g.nv - 1; j >= 1; j--) border.push(proj[idx(0, j)]);
-    if (border.some(p => !p)) dc.outline.style.display = 'none';
-    else {
-      dc.outline.style.display = '';
-      dc.outline.setAttribute('points', border.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '));
+    if (!dc.pending) {
+      dc.pending = svg('rect', { class: 'ed-decal-pending', rx: 2 });
+      n.g.appendChild(dc.pending);
+      if (!dc.label) { dc.label = svg('text', { class: 'ed-decal-label' }); n.g.appendChild(dc.label); }
     }
-    // 标签锚在深度网格的几何中心（旧切平面 frame.center 已不再通用）
-    const cs = [g.points[idx(0, 0)], g.points[idx(g.nu, 0)],
-      g.points[idx(g.nu, g.nv)], g.points[idx(0, g.nv)]].filter(Boolean);
-    const center = cs.length === 4
-      ? [0, 1, 2].map(k => cs.reduce((sum, q) => sum + q[k], 0) / 4)
-      : (a.points[0] || [0, 0, 0]);
-    const mid = this._project(ctx, center) || pts.find(Boolean) || { x: 0, y: 0 };
-    setText(dc.label, a.title || '贴面矩形');
-    dc.label.setAttribute('x', (mid?.x || 0) + 8);
-    dc.label.setAttribute('y', (mid?.y || 0) - 8);
     n.g.style.color = c;
-    n.g.setAttribute('class', 'ed-g ed-decal-g' + (selected ? ' ed-sel' : '') + (locked ? ' ed-locked' : ''));
-    n.g.style.pointerEvents = locked ? 'none' : '';
+    n.g.setAttribute('class', 'ed-g ed-decal-g ed-decal-pending-g' +
+      (selected ? ' ed-sel' : '') + (locked ? ' ed-locked' : ''));
+    n.g.style.pointerEvents = 'none';
 
-    // ---------- DOM 面：四点单应透视贴视频 / 占位图案 ----------
-    if (!dc.dom) {
-      el.innerHTML = `
-        <div class="ed-decal-surface">
-          <video class="ed-decal-video" muted loop playsinline autoplay preload="none"></video>
-          <div class="ed-decal-hatch"></div>
-          <div class="ed-decal-tag">▦ MESH 贴面 · 视频投射区</div>
-        </div>`;
-      dc.dom = { video: el.querySelector('.ed-decal-video') };
-    }
-    const W = SCREEN_TEX_W;
-    // 源纹理宽高比取「屏幕框」的宽高比：用户框多大，视频就按多大比例投上去
-    const r = (hasSurface ? s.rect : null) || a.rect || [0, 0, 1, 1];
-    const rw = Math.abs(r[2] - r[0]) || 1, rh = Math.abs(r[3] - r[1]) || 1;
-    const ratio = Math.max(0.2, Math.min(5, rh / rw));
-    const H = Math.max(120, Math.round(W * ratio));
-    const nearClip = (ctx.cam?.nearClip || 0.1);
-    const quadP = [proj[idx(0, 0)], proj[idx(g.nu, 0)], proj[idx(g.nu, g.nv)], proj[idx(0, g.nv)]];
-    // 任一角点越过近裁剪面（d 趋近 0）时单应矩阵会畸变，直接隐藏 DOM 视频面（SVG 网格不受影响）
-    const quad = quadP.map(p => (p && p.d >= nearClip) ? [p.x, p.y] : null);
-    if (quad.some(v => !v)) el.style.display = 'none';
-    else {
-      // 按投影后的局部 u / v 方向重排四角：贴在地面的矩形常常需要 180° 旋转，
-      // 否则视频文字会倒着贴到 MESH 上（俯视时 u 向左、v 向上）。
-      const q4 = orientQuad(quad);
-      const m = homographyMatrix3d(q4, W, H);
-      if (!m) el.style.display = 'none';
-      else {
-        el.style.display = '';
-        el.style.width = W + 'px'; el.style.height = H + 'px';
-        el.style.left = '0px'; el.style.top = '0px';
-        el.style.transformOrigin = '0 0';
-        el.style.transform = m;
+    const r = Array.isArray(a.rect) && a.rect.length === 4 &&
+      a.rect.every(Number.isFinite) ? a.rect : null;
+    if (!r) {
+      dc.pending.style.display = 'none';
+      const p = this._project(ctx, a.points?.[0] || [0, 0, 0]);
+      dc.label.style.display = p ? '' : 'none';
+      if (p) {
+        setText(dc.label, (a.title || '贴面矩形') + ' · 等待重新投射');
+        dc.label.setAttribute('x', (p.x + 8).toFixed(1));
+        dc.label.setAttribute('y', (p.y - 8).toFixed(1));
       }
+      return 0;
     }
-    el.dataset.kind = a.kind;
-    // 视频层不参与鼠标命中，拾取统一由 SVG 网格接管
-    el.style.pointerEvents = 'none';
-    el.style.setProperty('--c', c);
-    el.style.setProperty('--op', String(a.style.opacity));
-    this._syncClass(el, 'ed-decal', !!selected, false, locked);
-
-    const media = (a.media || [])[0] || null;
-    const url = media?.type === 'video' ? (media.url || '') : '';
-    const vSig = 'video|' + url;
-    if (dc.dom.video.dataset.sig !== vSig) {
-      dc.dom.video.dataset.sig = vSig;
-      if (url) {
-        try { dc.dom.video.srcObject = null; } catch { /* noop */ }
-        if (dc.dom.video.getAttribute('src') !== url) dc.dom.video.setAttribute('src', url);
-      } else {
-        dc.dom.video.removeAttribute('src');
-        const stream = demoVideoStream('MESH 贴面投射 · 演示画面');
-        if (stream) { try { dc.dom.video.srcObject = stream; } catch { /* noop */ } }
-      }
-      const pr = dc.dom.video.play?.();
-      if (pr?.catch) pr.catch(() => { /* 自动播放策略拒绝时静默降级 */ });
+    const v = this.getViewer();
+    const canvas = v?.app?.graphicsDevice?.canvas;
+    const cr = canvas?.getBoundingClientRect();
+    if (!cr || !(cr.width > 0) || !(cr.height > 0)) {
+      dc.pending.style.display = 'none'; dc.label.style.display = 'none'; return 0;
     }
-    return cellDrawn;
+    const hr = this.host.getBoundingClientRect();
+    const x0 = cr.left - hr.left + r[0] * cr.width;
+    const y0 = cr.top - hr.top + r[1] * cr.height;
+    const x1 = cr.left - hr.left + r[2] * cr.width;
+    const y1 = cr.top - hr.top + r[3] * cr.height;
+    dc.pending.style.display = '';
+    dc.pending.setAttribute('x', Math.min(x0, x1).toFixed(1));
+    dc.pending.setAttribute('y', Math.min(y0, y1).toFixed(1));
+    dc.pending.setAttribute('width', Math.abs(x1 - x0).toFixed(1));
+    dc.pending.setAttribute('height', Math.abs(y1 - y0).toFixed(1));
+    dc.label.style.display = '';
+    setText(dc.label, (a.title || '贴面矩形') + ' · 等待重新投射');
+    dc.label.setAttribute('x', (Math.min(x0, x1) + 6).toFixed(1));
+    dc.label.setAttribute('y', (Math.min(y0, y1) - 6).toFixed(1));
+    return 0;
   }
 
   // ------------------------------------------------------------- 贴面矩形（投影式延迟贴花 OBB）
@@ -1130,10 +1079,34 @@ export class Overlay {
     if (o.handles) o.handles.style.display = 'none';
   }
 
+  /** 浏览态：贴花不再画任何辅助图形（线框 / 手柄 / 占位框 / 标签 / 单应视频面），
+   *  只保留一个空的 <g> 节点（data-id 仍可被图层树 / 诊断读到）。
+   *  视频由 GPU 投射层绘制（见 decal-runtime.js），DOM 侧不能有任何可见痕迹。 */
+  _hideDecalGuides(n, el, dc) {
+    if (dc) {
+      if (dc.cellG) dc.cellG.style.display = 'none';
+      if (dc.outline) dc.outline.style.display = 'none';
+      if (dc.pending) dc.pending.style.display = 'none';
+      if (dc.label) dc.label.style.display = 'none';
+      if (dc.dom && dc.dom.video) {
+        const p = dc.dom.video.parentElement;
+        if (p) p.style.display = 'none';
+      }
+    }
+    this._hideDecalOBB(n);
+    if (n.g) {
+      n.g.style.display = 'none';
+      n.g.style.pointerEvents = 'none';
+    }
+    if (el && el.style.display !== 'none') el.style.display = 'none';
+    return 0;
+  }
+
   _drawDecalProjector(a, selected, ctx, locked, n, el, c, dc) {
-    // 隐藏旧网格 / 单应视频 DOM（projector 模式不需要）
+    // 隐藏旧网格 / 占位框 / 单应视频 DOM（projector 模式不需要）
     if (dc.cellG) dc.cellG.style.display = 'none';
     if (dc.outline) dc.outline.style.display = 'none';
+    if (dc.pending) dc.pending.style.display = 'none';
     if (dc.label) dc.label.style.display = 'none';
     if (dc.dom && dc.dom.video) { const p = dc.dom.video.parentElement; if (p) p.style.display = 'none'; }
 
@@ -1149,10 +1122,18 @@ export class Overlay {
     o.g.style.display = '';
     o.handles.style.display = selected ? '' : 'none';
 
-    // 8 个 OBB 角点（世界）-> 投影
-    const corners = projectorOBBCorners(a.projector);
+    /* 8 个体角点（世界）-> 投影。
+       ortho = OBB；persp = 视锥台（近平面 4 点 / 远平面 4 点，同一索引顺序），
+       所以下面 12 条边的连线表在两种模式下都成立。 */
+    const isPersp = a.projector.mode === 'persp';
+    const corners = projectorVolumeCorners(a.projector);
     const proj = corners.map(p => this._project(ctx, p));
-    const visible = proj.every(p => p && p.d > 0.05);
+    /* 正交 OBB 在盒心不重叠镜头时 8 个角点必定都在视锥内；
+       透视视锥体的光心常常就在相机旁边，远平面角点也可能出画。
+       只要还有两条可连的棱就照样画（逐边判定见下），不要整块隐藏。 */
+    const visible = isPersp
+      ? proj.filter(p => p && p.d > 0.05).length >= 2
+      : proj.every(p => p && p.d > 0.05);
     if (!visible) { o.g.style.display = 'none'; o.handles.style.display = 'none'; return 0; }
 
     // 12 条边（索引对）
@@ -1182,14 +1163,27 @@ export class Overlay {
       y: rotateByQuat([0, a.projector.half[1], 0], a.projector.quaternion),
       z: rotateByQuat([0, 0, a.projector.half[2]], a.projector.quaternion)
     };
-    const handles = [
-      { k: 'mx', w: [pos[0] - axisDir.x[0], pos[1] - axisDir.x[1], pos[2] - axisDir.x[2]] },
-      { k: 'px', w: [pos[0] + axisDir.x[0], pos[1] + axisDir.x[1], pos[2] + axisDir.x[2]] },
-      { k: 'my', w: [pos[0] - axisDir.y[0], pos[1] - axisDir.y[1], pos[2] - axisDir.y[2]] },
-      { k: 'py', w: [pos[0] + axisDir.y[0], pos[1] + axisDir.y[1], pos[2] + axisDir.y[2]] },
-      { k: 'mz', w: [pos[0] - axisDir.z[0], pos[1] - axisDir.z[1], pos[2] - axisDir.z[2]] },
-      { k: 'pz', w: [pos[0] + axisDir.z[0], pos[1] + axisDir.z[1], pos[2] + axisDir.z[2]] }
-    ];
+    /* 手柄语义：
+       · ortho：中心 = 盒心平移；±X / ±Y / ±Z = 三个半尺寸。
+       · persp：中心 = 光心平移；±X / ±Y = 远平面半宽 / 半高（改视场）；
+         +Z = 远距（等比缩放远平面，保持 FOV 不变）。
+         透视模式下 -Z 手柄在光心背后没有意义，直接不给。 */
+    const handles = isPersp
+      ? [
+        { k: 'px', w: [pos[0] + axisDir.x[0], pos[1] + axisDir.x[1], pos[2] + axisDir.x[2]] },
+        { k: 'mx', w: [pos[0] - axisDir.x[0], pos[1] - axisDir.x[1], pos[2] - axisDir.x[2]] },
+        { k: 'py', w: [pos[0] + axisDir.y[0], pos[1] + axisDir.y[1], pos[2] + axisDir.y[2]] },
+        { k: 'my', w: [pos[0] - axisDir.y[0], pos[1] - axisDir.y[1], pos[2] - axisDir.y[2]] },
+        { k: 'pz', w: [pos[0] + axisDir.z[0], pos[1] + axisDir.z[1], pos[2] + axisDir.z[2]] }
+      ]
+      : [
+        { k: 'mx', w: [pos[0] - axisDir.x[0], pos[1] - axisDir.x[1], pos[2] - axisDir.x[2]] },
+        { k: 'px', w: [pos[0] + axisDir.x[0], pos[1] + axisDir.x[1], pos[2] + axisDir.x[2]] },
+        { k: 'my', w: [pos[0] - axisDir.y[0], pos[1] - axisDir.y[1], pos[2] - axisDir.y[2]] },
+        { k: 'py', w: [pos[0] + axisDir.y[0], pos[1] + axisDir.y[1], pos[2] + axisDir.y[2]] },
+        { k: 'mz', w: [pos[0] - axisDir.z[0], pos[1] - axisDir.z[1], pos[2] - axisDir.z[2]] },
+        { k: 'pz', w: [pos[0] + axisDir.z[0], pos[1] + axisDir.z[1], pos[2] + axisDir.z[2]] }
+      ];
     while (o.hcircles.length < handles.length + 1) {
       const c2 = svg('circle', { class: 'ed-decal-obb-handle', r: 5 });
       o.handles.appendChild(c2); o.hcircles.push(c2);
@@ -1231,7 +1225,21 @@ export class Overlay {
       const move = (ev) => {
         const a2 = this.store.get(id);
         if (!a2 || !a2.projector) return;
-        const w = this._decalDragWorld(ev.clientX, ev.clientY, cam, a2.projector.position);
+        /* 拖拽基准面：中心手柄用光心/盒心；轴向手柄用「手柄自己所在的位置」。
+           透视视锥体的光心常常就贴着相机，用光心做基准面时 +Z 轴的投影几乎退化
+           （面与视线垂直 → 拖多远都算不出新的远距），用远平面中心做基准才正常。 */
+        let p0 = a2.projector.position;
+        if (a2.projector.mode === 'persp' && axis !== 'move') {
+          const pr = a2.projector;
+          const sgn = axis[0] === 'p' ? 1 : -1;
+          const ax = axis[1];
+          const local = ax === 'x' ? [sgn * pr.half[0], 0, 0]
+            : ax === 'y' ? [0, sgn * pr.half[1], 0]
+              : [0, 0, sgn * pr.half[2]];
+          const r = rotateByQuat(local, pr.quaternion);
+          p0 = [pr.position[0] + r[0], pr.position[1] + r[1], pr.position[2] + r[2]];
+        }
+        const w = this._decalDragWorld(ev.clientX, ev.clientY, cam, p0);
         if (!w) return;
         suppressed = true;
         this._applyDecalDrag(id, axis, w);
@@ -1280,8 +1288,31 @@ export class Overlay {
     const worldAxis = rotateByQuat(localAxis, p.quaternion);
     const rel = { x: world.x - c[0], y: world.y - c[1], z: world.z - c[2] };
     const dist = Math.abs(rel.x * worldAxis[0] + rel.y * worldAxis[1] + rel.z * worldAxis[2]);
-    const half = p.half.slice();
     const idx = axis[1] === 'x' ? 0 : axis[1] === 'y' ? 1 : 2;
+    if (p.mode === 'persp') {
+      /* 透视视锥：手柄分别位于远平面半宽 / 半高 / 远距处，
+         所以拖动距离就是要写的新值。写回前把 half 与 fov/aspect 重新对齐：
+         · ±X → 改远平面半宽（宽高比变）
+         · ±Y → 改远平面半高（竖直 FOV 变）
+         · +Z → 改远距（半宽半高等比缩放，FOV 不变） */
+      const far0 = Math.max(0.3, Number(p.half[2]) || 1);
+      let halfX = Math.max(0.02, p.half[0]);
+      let halfY = Math.max(0.02, p.half[1]);
+      let far = far0;
+      if (idx === 0) halfX = Math.max(0.02, dist);
+      else if (idx === 1) halfY = Math.max(0.02, dist);
+      else {
+        far = Math.max(0.3, dist);
+        const k = far / far0;
+        halfX *= k; halfY *= k;
+      }
+      const fov = 2 * Math.atan2(halfY, far) * 180 / Math.PI;
+      const aspect = halfX / Math.max(1e-4, halfY);
+      const next = retuneFrustumProjector({ ...p, half: [halfX, halfY, far] }, { far, fov, aspect });
+      if (next) this.store.update(id, { projector: next });
+      return;
+    }
+    const half = p.half.slice();
     half[idx] = Math.max(0.05, dist);   // 手柄位于半尺寸处，拖动距离即新半尺寸
     this.store.update(id, { projector: { ...p, half, depth: half[2] * 2 } });
   }
@@ -1527,6 +1558,32 @@ export class Overlay {
     } else {
       d.rubber.style.display = 'none';
       d.cross.style.display = 'none';
+    }
+
+    /* 透视贴花草稿：落第一个点之后就把「将要生成的视锥体」实时画出来。
+       不这样做的话，用户点第二点前完全看不到视场范围，只能靠猜。 */
+    if (!d.frustum) d.frustum = { g: svg('g', { class: 'ed-draft-frustum' }), lines: [] };
+    if (!d.frustum.g.parentNode) d.g.appendChild(d.frustum.g);
+    const target = (draft.kind === 'frustum' && draft.points.length >= 1) ? this.cursor : null;
+    const prj = target ? makeFrustumProjector(draft.points[0], target) : null;
+    const cv = prj ? projectorVolumeCorners(prj) : null;
+    const cp = cv ? cv.map(p => this._project(ctx, p)) : null;
+    const frustumVisible = !!(cp && cp.every(Boolean));
+    d.frustum.g.style.display = frustumVisible ? '' : 'none';
+    if (frustumVisible) {
+      const edges = [[0, 1], [1, 3], [3, 2], [2, 0], [4, 5], [5, 7], [7, 6], [6, 4],
+        [0, 4], [1, 5], [2, 6], [3, 7]];
+      while (d.frustum.lines.length < edges.length) {
+        const ln = svg('line', { class: 'ed-draft-frustum-edge' });
+        d.frustum.g.appendChild(ln); d.frustum.lines.push(ln);
+      }
+      d.frustum.lines.forEach((ln, i) => {
+        const e = edges[i];
+        if (!e) { ln.style.display = 'none'; return; }
+        ln.style.display = '';
+        ln.setAttribute('x1', cp[e[0]].x.toFixed(1)); ln.setAttribute('y1', cp[e[0]].y.toFixed(1));
+        ln.setAttribute('x2', cp[e[1]].x.toFixed(1)); ln.setAttribute('y2', cp[e[1]].y.toFixed(1));
+      });
     }
   }
 }

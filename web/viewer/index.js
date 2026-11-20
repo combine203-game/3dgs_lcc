@@ -87970,6 +87970,178 @@ class Picker {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 投影仪深度渲染器（Decal Shadow-Map Pass1）。
+// 用一台「正交投影仪相机」跑引擎自带的 gsplat pick pass，把 3DGS 场景本身
+// 渲染成深度纹理。与 Picker 的区别：Picker 绑定主相机且跟随 canvas 尺寸；
+// 这里绑定一台独立正交相机，尺寸由贴花投影仪决定，供 Pass3 做同源深度比较。
+// ---------------------------------------------------------------------------
+// pick pass 输出 RGBA16F 四个通道，每通道是一次独立伯努利试验的「最近幸存
+// 归一化深度」（1=无命中），与引擎 surfaceDepth() 的输入完全一致。Pass3 在
+// shader 里用 30% 分位口径 resolve 出确定性表面深度，因此这里无需改 pick
+// shader，也不产生 CPU 采样。
+// 关键前提：RenderPassPicker.before() -> gsplatDirector.prepareForPicking(
+//   camera.camera, w, h, layer) 用传入相机的 node 做 GPU 排序，且 pick shader
+//   的 camera_params.w 已支持 isOrtho（正交时直接用 gl_FragCoord.z 线性深度）。
+//   因此正交相机能被现成管线接受，无需重写排序。
+class ProjectorDepthRenderer {
+    constructor(app) {
+        this.app = app;
+        this.device = app.graphicsDevice;
+        this.camera = null;
+        this.layer = null;
+        this.pass = null;
+        this.texture = null;
+        this.target = null;
+        this.chunksPatched = false;
+        this.size = 0;
+        this.viewProj = new Float32Array(16);
+        this.worldLayer = app.scene.layers.getLayerByName('World');
+    }
+
+    _ensure(size) {
+        if (this.pass && this.size === size) return true;
+        this._destroy();
+        const device = this.device;
+        try {
+            if (!this.chunksPatched) {
+                registerPickerShaderPatches(this.app);
+                this.chunksPatched = true;
+            }
+            this.texture = new Texture(device, {
+                format: PIXELFORMAT_RGBA16F,
+                width: size, height: size,
+                mipmaps: false,
+                minFilter: FILTER_NEAREST, magFilter: FILTER_NEAREST,
+                addressU: ADDRESS_CLAMP_TO_EDGE, addressV: ADDRESS_CLAMP_TO_EDGE,
+                name: 'projector-depth-trials'
+            });
+            this.target = new RenderTarget({
+                colorBuffer: this.texture,
+                depth: true
+            });
+            // RenderPassPicker：depth=false 输出深度试验；MIN 混合逐通道保留最近深度。
+            this.pass = new RenderPassPicker(device, this.app.renderer);
+            this.pass.blendState = new BlendState(true, BLENDEQUATION_MIN,
+                BLENDMODE_ONE, BLENDMODE_ONE, BLENDEQUATION_MIN, BLENDMODE_ONE, BLENDMODE_ONE);
+            // 独立正交相机：只在 pick pass 渲染时启用，平时关闭不干扰主渲染。
+            this.camera = new Entity('projector-depth-cam', this.app);
+            this.camera.addComponent('camera', {
+                projection: PROJECTION_ORTHOGRAPHIC,
+                nearClip: 0.01, farClip: 100,
+                orthoHeight: 1, aspectRatio: 1,
+                clearColorBuffer: true, clearDepthBuffer: true,
+                enabled: false,
+                priority: -1000,
+                layers: []
+            });
+            this.app.root.addChild(this.camera);
+            this.size = size;
+            return true;
+        } catch (e) {
+            console.warn('[projector-depth] 初始化失败：' + (e && e.message || e));
+            this._destroy();
+            return false;
+        }
+    }
+
+    // projector: {position:[x,y,z], quaternion:[x,y,z,w], half:[hx,hy,hz],
+    //             mode?:'ortho'|'persp', near?, far?}
+    //   mode='persp' 时 position 是光心、half=[远平面半宽, 远平面半高, 远距]，
+    //   near/far 为沿光轴的近 / 远裁剪距离（透视投影贴花）。
+    // 返回 { texture, viewProj, size } 或 null。
+    render(projector, size) {
+        if (!projector || !Array.isArray(projector.position) ||
+            !Array.isArray(projector.quaternion) || !Array.isArray(projector.half) ||
+            !this.worldLayer) return null;
+        const sz = Math.max(16, Math.min(512, Math.round(size) || 128));
+        if (!this._ensure(sz)) return null;
+        try {
+            const pos = projector.position;
+            const q = projector.quaternion;
+            const half = projector.half;
+            // 与 adapter.setDepthPassProjector 一致：相机放在 OBB 背面（局部 -Z），
+            // 朝 +Z 看向场景。+Z 是投射方向。用引擎 Quat.transformVector 保证与
+            // 主渲染管线同一套旋转数学（避免手写四元数展开的符号/顺序错误）。
+            const qrot = new Quat(q[0], q[1], q[2], q[3]);
+            const fwdV = qrot.transformVector(new Vec3(0, 0, 1));
+            const upV = qrot.transformVector(new Vec3(0, 1, 0));
+            const fwd = [fwdV.x, fwdV.y, fwdV.z];
+            const up = [upV.x, upV.y, upV.z];
+            /* 两种投影机工作模式（projector.mode）：
+               · ortho（默认 / 旧数据）：position = OBB 盒心，相机退到盒背面，正交视锥
+                 = OBB 的 XY 范围；半高 = half[1]。
+               · persp：position = 光心，相机就站在光心沿 +Z 看出去，竖直 fov 由
+                 「远平面半高 half[1] / 远距 far」反推（tan(fov/2) = half[1]/far），
+                 近 / 远裁剪面直接取 projector.near / projector.far。
+                 深度图因此是透视投影，Pass3 的深度比较用线性视距（见 decal-shaders）。 */
+            const isPersp = projector.mode === 'persp';
+            const cam = this.camera;
+            const cc = cam.camera;
+            let eye, tgt;
+            if (isPersp) {
+                const nf = Math.max(0.02, Number(projector.near) || half[2] * 0.02);
+                const ff = Math.max(nf + 0.05, Number(projector.far) || half[2]);
+                eye = [pos[0], pos[1], pos[2]];
+                tgt = [pos[0] + fwd[0] * ff, pos[1] + fwd[1] * ff, pos[2] + fwd[2] * ff];
+                cam.setPosition(eye[0], eye[1], eye[2]);
+                cam.lookAt(new Vec3(tgt[0], tgt[1], tgt[2]), new Vec3(up[0], up[1], up[2]));
+                cc.projection = PROJECTION_PERSPECTIVE;
+                cc.fov = Math.min(150, Math.max(2,
+                    2 * Math.atan2(Math.max(1e-4, half[1]), ff) * 180 / Math.PI));
+                cc.aspectRatio = Math.max(0.05, half[0] / Math.max(0.05, half[1]));
+                cc.nearClip = nf;
+                cc.farClip = ff;
+            } else {
+                const margin = Math.max(1, half[2] * 0.25);
+                const back = half[2] + margin;
+                eye = [pos[0] - fwd[0] * back, pos[1] - fwd[1] * back, pos[2] - fwd[2] * back];
+                tgt = [pos[0] + fwd[0] * half[2], pos[1] + fwd[1] * half[2], pos[2] + fwd[2] * half[2]];
+                cam.setPosition(eye[0], eye[1], eye[2]);
+                cam.lookAt(new Vec3(tgt[0], tgt[1], tgt[2]), new Vec3(up[0], up[1], up[2]));
+                cc.projection = PROJECTION_ORTHOGRAPHIC;
+                cc.orthoHeight = Math.max(0.05, half[1]);
+                cc.aspectRatio = Math.max(0.05, half[0] / Math.max(0.05, half[1]));
+                cc.nearClip = 0.01;
+                cc.farClip = 2 * half[2] + 2 * margin + 2;
+            }
+            cc.enabled = true;
+
+            this.pass.init(this.target);
+            this.pass.setClearColor(farColor);
+            this.pass.update(cc, this.app.scene, [this.worldLayer], new Map(), false);
+            this.pass.render();
+
+            // ViewProj：相机矩阵在 render 后已刷新（prepareForPicking 用同一相机）。
+            this.viewProj = Float32Array.from(
+                new Mat4().mul2(cc.projectionMatrix, cc.viewMatrix).data
+            );
+            cc.enabled = false;
+            return { texture: this.texture, viewProj: this.viewProj, size: sz };
+        } catch (e) {
+            try { this.camera.camera.enabled = false; } catch (_) { /* noop */ }
+            console.warn('[projector-depth] 渲染失败：' + (e && e.message || e));
+            return null;
+        }
+    }
+
+    _destroy() {
+        try { this.pass?.destroy(); } catch (_) { /* noop */ }
+        try { this.camera?.destroy(); } catch (_) { /* noop */ }
+        try { this.target?.destroy(); } catch (_) { /* noop */ }
+        try { this.texture?.destroy(); } catch (_) { /* noop */ }
+        if (this.chunksPatched) {
+            try { unregisterPickerShaderPatches(this.app); } catch (_) { /* noop */ }
+            this.chunksPatched = false;
+        }
+        this.pass = null; this.camera = null; this.target = null; this.texture = null;
+        this.size = 0;
+    }
+
+    destroy() {
+        this._destroy();
+    }
+}
 // The resident set: which splats the engine's LOD and streaming have made resident this
 // frame, and where each node's data sits. The engine keeps octree LOD, the budget, file
 // streaming and the block allocator (one slot range per node); the stochastic renderer
@@ -110336,6 +110508,17 @@ const createViewer = async (options) => {
     const viewer = new Viewer(global, gsplatLoad, skyboxLoad, collisionLoad, sequenceLoad);
     viewer.onDestroy(persistPreferences(events));
     viewer.onDestroy(() => quality.destroy());
+
+    // 贴花 Pass1：正交投影仪相机渲染 3DGS 到深度纹理。单例工厂挂到 app，
+    // 供 engine/playcanvas-adapter.js 用现成的 app 引用取用，不额外传参。
+    let projectorDepthRenderer = null;
+    const getProjectorDepth = () => {
+        if (!projectorDepthRenderer) projectorDepthRenderer = new ProjectorDepthRenderer(app);
+        return projectorDepthRenderer;
+    };
+    try { app.__mgProjectorDepth = getProjectorDepth; } catch (_) { /* noop */ }
+    viewer.onDestroy(() => { projectorDepthRenderer?.destroy(); projectorDepthRenderer = null; });
+
     const handle = {
         app,
         state,
@@ -110414,11 +110597,12 @@ globalThis.__mgMakeMeshCollision = (positions, indices) => new MeshCollision(pos
 // 常量）。引擎是独立 bundle，未导出 pc 命名空间，这里集中暴露到 globalThis，
 // 供 web/editor/decal-projection.js 复用，避免重复造渲染基建。
 globalThis.__pc = {
-  Vec2, Vec3, Mat4, Quat, GraphNode,
+  Vec2, Vec3, Mat4, Quat, GraphNode, Entity, Layer, RenderTarget,
   Mesh, MeshInstance, ShaderMaterial, StandardMaterial, Material, Texture, BlendState,
   ADDRESS_CLAMP_TO_EDGE, ADDRESS_REPEAT, FILTER_NEAREST, FILTER_LINEAR,
   PIXELFORMAT_RGBA8, PIXELFORMAT_RGBA16F, PIXELFORMAT_R32F, PIXELFORMAT_R16F,
-  PRIMITIVE_TRISTRIP, PRIMITIVE_TRIANGLES,
+  PIXELFORMAT_DEPTH, PRIMITIVE_TRISTRIP, PRIMITIVE_TRIANGLES,
+  PROJECTION_ORTHOGRAPHIC, RENDERTARGET_ORIGIN_NATIVE, FUNC_LESS,
   BLEND_NONE, BLEND_NORMAL, BLEND_ADDITIVE,
   CULLFACE_NONE, SEMANTIC_POSITION, LAYERID_WORLD, DEVICETYPE_WEBGL2
 };

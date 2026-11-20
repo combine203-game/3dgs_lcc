@@ -595,6 +595,11 @@ html.mg-editor-on #mg-stage { cursor: crosshair; }
   stroke-linejoin: round; stroke-linecap: round; opacity: 1;
 }
 .ed-draft-flow { pointer-events: none; }
+/* 透视贴花草稿：落第一个点后实时预览将要生成的视锥体 */
+.ed-draft-frustum { pointer-events: none; }
+.ed-draft-frustum-edge {
+  stroke: #ffd479; stroke-width: 1.6; stroke-dasharray: 6 4; opacity: .9;
+}
 .ed-draft-flow-seg {
   fill: #7ff3ff; fill-opacity: .34; stroke: #bff6ff; stroke-opacity: .9;
   stroke-width: 1.2; stroke-linejoin: round; pointer-events: none;
@@ -614,6 +619,14 @@ html.mg-editor-on #mg-stage { cursor: crosshair; }
   stroke-linejoin: round; pointer-events: none;
   filter: drop-shadow(0 0 4px currentColor);
 }
+/* 投影机未就绪时的屏幕空间占位框：仅 4 个归一化屏幕角点，不经过世界点投影。
+   虚线 + 半透明区别于 projector 就绪后的实线 OBB 线框，提示用户需重新投射。 */
+.ed-decal-pending {
+  fill: currentColor; fill-opacity: .06;
+  stroke: currentColor; stroke-width: 1.6; stroke-opacity: .75;
+  stroke-dasharray: 7 5; pointer-events: none;
+}
+.ed-g.ed-sel .ed-decal-pending { stroke-width: 2.2; stroke-opacity: 1; }
 .ed-decal-label {
   font-size: 12px; font-weight: 700; fill: #eafcff;
   paint-order: stroke; stroke: #04121a; stroke-width: 3px; pointer-events: none;

@@ -7,8 +7,10 @@
  *   2) webgpu-decal    tools/diagnose_decal_repro.mjs     WebGPU 后端 + 真实新建贴面矩形
  *      （断言 pickReady=1 / 无 degraded / 0 GPU uncaptured error）
  *   3) editor-canvas   tools/diagnose_editor_canvas.mjs   WebGL2 编辑态画布 / postrender / GL 状态
+ *   4) panorama-ui     tools/verify_panorama_ui.mjs       真实 Viewer 页内六面取帧 + 拼接 + 导出
+ *   5) browse-ann      tools/verify_ann_layer.mjs         浏览态标注层 + 场景图层显隐（含编辑态开合）
  * 产出 qa-report.json；任一步 FAIL 即退出码 1。
- * 用法：node tools/qa_acceptance.mjs [--skip-canvas]
+ * 用法：node tools/qa_acceptance.mjs [--skip-canvas] [--skip-pano] [--skip-ann]
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -18,6 +20,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const OUT = process.env.QA_REPORT || path.join(ROOT, 'qa-report.json');
 const skipCanvas = process.argv.includes('--skip-canvas');
+const skipPano = process.argv.includes('--skip-pano');
+const skipAnn = process.argv.includes('--skip-ann');
 
 const steps = [
   { name: 'dom-regression', cmd: 'node tools/verify_editor.mjs', timeout: 600000 },
@@ -25,6 +29,12 @@ const steps = [
 ];
 if (!skipCanvas) {
   steps.push({ name: 'editor-canvas', cmd: 'node tools/diagnose_editor_canvas.mjs --wait=18000', timeout: 600000 });
+}
+if (!skipPano) {
+  steps.push({ name: 'panorama-ui', cmd: 'node tools/verify_panorama_ui.mjs --wait=20000', timeout: 600000 });
+}
+if (!skipAnn) {
+  steps.push({ name: 'browse-ann', cmd: 'node tools/verify_ann_layer.mjs', timeout: 600000 });
 }
 
 const report = { time: new Date().toISOString(), node: process.version, steps: [], pass: false };
@@ -42,8 +52,8 @@ for (const s of steps) {
   const domSummary = out.match(/(\d+) PASS \/ (\d+) FAIL/);
   let pass = r.status === 0;
   if (domSummary) pass = pass && domSummary[2] === '0';
-  else pass = pass && /编辑态画布: PASS|贴面矩形结果: PASS/.test(out) &&
-    !/编辑态画布: FAIL|贴面矩形结果: FAIL|DIAG FAILED/.test(out);
+  else pass = pass && /编辑态画布: PASS|贴面矩形结果: PASS|全景功能: PASS|场景图层: PASS/.test(out) &&
+    !/编辑态画布: FAIL|贴面矩形结果: FAIL|全景功能: FAIL|场景图层: FAIL|DIAG FAILED/.test(out);
   const passLine = domSummary;
   const lines = out.split(/\r?\n/).filter(l => /PASS|FAIL|结论|mean|pickReady|偏差|错误|告警|前置条件|GPU 管线|====/.test(l));
   console.log(lines.slice(-14).join('\n'));
