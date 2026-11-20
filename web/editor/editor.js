@@ -30,6 +30,7 @@ import { KINDS, makeAnnotation, LAYER_PALETTE, GROUP_PALETTE, DEFAULT_GROUP_ID,
   buildShadowDepthMap, makeFrustumProjector, retuneFrustumProjector } from './schema.js';
 import { rayHitMesh } from './mesh-pick.js';
 import { createDecalProjection } from './decal-projection.js';
+import { decalsForGPU } from '../decal-runtime.js';
 import { resolveEngineAdapter } from '../engine/index.js';
 
 // 直接向父页发消息，不再 import bridge.js —— 避免
@@ -211,24 +212,10 @@ export async function mount(opts = {}) {
   } catch (e) {
     console.warn('[editor] decal 投射管理器初始化失败，已降级：', e);
   }
+  /* 注记 → GPU 实例描述：与浏览态（browse-annotations.js）共用
+     decal-runtime.js 的 decalsForGPU，避免两个入口的参数口径漂移。 */
   function getDecals() {
-    return store.list(state.scene)
-      .filter(a => a.kind === 'decal' && a.visible !== false && a.projector)
-      .map(a => ({
-        id: a.id,
-        projector: a.projector,
-        shadow: a.projector && a.projector.shadow,
-        videoUrl: a.media && a.media[0] && a.media[0].type === 'video' ? a.media[0].url : null,
-        visible: a.visible !== false,
-        opacity: Number(a.style.decalOpacity ?? 0.9),
-        edge: Number(a.style.decalEdge ?? 0.12),
-        // 背面剔除默认关闭：深度差分重建的法向在掠射角仍有噪声，开启会把
-        // 贴花打出斑驳空洞。默认「能显示」，把是否剔除交给用户显式选择。
-        cull: a.style.decalCull === true,
-        // 运行期可覆盖：归一化基准（1=整框）与深度采样口径（1=引擎同族）
-        boxScale: Number.isFinite(Number(a.style.decalBoxScale)) ? Number(a.style.decalBoxScale) : undefined,
-        depthMode: Number.isFinite(Number(a.style.decalDepthMode)) ? Number(a.style.decalDepthMode) : undefined
-      }));
+    return decalsForGPU(store.list(state.scene));
   }
   function syncDecals() {
     if (decalMgr && decalMgr.enabled && typeof decalMgr.sync === 'function') {

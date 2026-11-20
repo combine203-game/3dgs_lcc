@@ -503,6 +503,7 @@ export function createDecalProjection({ adapter, getDecals, useShadowPass } = {}
   function sync(decals) {
     if (!shaderOk) return;
     const next = new Set();
+    let changed = false;
     for (const dec of (decals || [])) {
       next.add(dec.id);
       let inst = manager.instances.get(dec.id);
@@ -510,6 +511,7 @@ export function createDecalProjection({ adapter, getDecals, useShadowPass } = {}
         inst = createInstance(dec);
         if (!inst) continue;               // 适配器创建失败：跳过本条，不影响其余
         manager.instances.set(dec.id, inst);
+        changed = true;
       }
       setVideoUrl(inst, dec.videoUrl);
       const pr = dec.projector;
@@ -551,8 +553,12 @@ export function createDecalProjection({ adapter, getDecals, useShadowPass } = {}
     }
     // 删除已不存在的
     for (const [id, inst] of manager.instances) {
-      if (!next.has(id)) { destroyInstance(inst); manager.instances.delete(id); }
+      if (!next.has(id)) { destroyInstance(inst); manager.instances.delete(id); changed = true; }
     }
+    /* 实例有增删时主动请求一帧：贴花驱动的是「按需渲染」链，没有实例时
+       onFrameEnd 不再请求下一帧（浏览态零开销）。若不在这里补一帧，
+       新加的贴花会一直等不到绘制，表现为「加了贴花却什么都没有」。 */
+    if (changed) { try { adapter.requestRender(); } catch (_) { /* noop */ } }
   }
 
   // ---------------------------------------------------------------- 每帧更新 uniform
@@ -676,8 +682,10 @@ export function createDecalProjection({ adapter, getDecals, useShadowPass } = {}
        不负责恢复。Viewer 首帧后已切按需渲染（autoRender=false），编辑态又只有
        一帧 renderNextFrame；若这里不显式再请求主帧，默认 framebuffer 永远不再
        重绘，3DGS 画面就此消失，只剩 #mg-stage 的深色底 —— 即「进入编辑黑屏」。
-       每帧请求一次主帧，保证 backBuffer 始终被主渲染覆盖；经节流后 <= maxFps。 */
-    requestThrottled();
+       每帧请求一次主帧，保证 backBuffer 始终被主渲染覆盖；经节流后 <= maxFps。
+       ★ 没有实例时不请求：浏览态（展厅常驻页）不应该因为挂了一个空的贴花
+         管理器就变成永动 30fps 渲染。新增实例时 sync() 会补一帧。 */
+    if (manager.instances.size) requestThrottled();
   }
 
   let prerenderWarned = false;

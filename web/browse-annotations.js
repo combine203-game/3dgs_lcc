@@ -30,6 +30,7 @@
 import { Store } from './editor/store.js';
 import { Overlay } from './editor/overlay.js';
 import { DEFAULT_GROUP_ID } from './editor/schema.js';
+import { createDecalRuntime } from './decal-runtime.js';
 
 const DOC_KEY = 'mg3dgs.annotations.v1';
 const VIEW_KEY = 'mg3dgs.browseView.v1';
@@ -163,7 +164,10 @@ const state = {
   sig: '',
   panel: null,
   btn: null,
-  standalone: false
+  standalone: false,
+  // 贴花 GPU 投射运行时（浏览态唯一负责「把视频投到场景表面」的东西）
+  decal: null,
+  decalTryAt: 0
 };
 
 const isEditorOn = () => {
@@ -207,6 +211,9 @@ function ensureOverlay() {
     isEditable: () => false,
     // 不用 isLocked：那会触发 .ed-locked 的变暗 / 去色，浏览态只需要「不可交互」
     isLocked: () => false,
+    // 浏览态不画贴花辅助线框（OBB / 视锥台 / 手柄 / 占位框）：观众只看得到
+    // 投射出来的视频，编辑辅助图形一律留给编辑态。
+    showDecalGuides: () => false,
     onPick: () => {}
   });
   // pointer-events:none 由 CSS 统一兜住（app.css .mg-ann-layer）
@@ -221,6 +228,55 @@ function teardownOverlay() {
   state.overlay = null;
   if (!ov) return;
   try { ov.destroy(); } catch (_) { /* noop */ }
+}
+
+/* ---------------------------------------------- 贴花投射（浏览态看得到视频的关键）
+
+   背景：贴花的画面是 GPU 后处理（decal-projection.js），不是 DOM。编辑器挂载时
+   由 editor.js 实例化；浏览态以前完全没有这条链路，于是「编辑里能看到投射视频，
+   退出编辑就看不见」。这里让浏览层自己装配一份投射运行时：
+
+     · 只在当前场景确实存在带 projector 的贴花时才创建（没有贴花 = 零开销，
+       不会把展厅常驻页变成永动渲染）；
+     · 进入编辑态立刻销毁，交给编辑器自己那份，绝不双份投射；
+     · 显隐 / 数据变更（图层树开关、别的标签页改动、编辑器退出）都走 sync()。 */
+
+function decalList() {
+  return state.store ? state.store.list(state.scene) : [];
+}
+
+function hasDecals() {
+  return decalList().some((a) => a.kind === 'decal' && a.visible !== false && a.projector);
+}
+
+function ensureDecalRuntime() {
+  if (state.decal || isEditorOn()) return state.decal;
+  if (!hasDecals()) return null;
+  // 引擎 / 相机 Picker 未就绪时 500ms 重试一次，避免每帧刷异常
+  const now = Date.now();
+  if (now - state.decalTryAt < 500) return null;
+  state.decalTryAt = now;
+  const v = window.__viewer;
+  if (!v?.app || !v.picker) return null;
+  const rt = createDecalRuntime({
+    getViewer: () => window.__viewer,
+    listDecals: decalList
+  });
+  if (!rt.sync()) { rt.destroy(); return null; }
+  state.decal = rt;
+  return rt;
+}
+
+function syncDecalRuntime() {
+  if (state.decal) { try { state.decal.sync(); } catch (_) { /* noop */ } }
+  else ensureDecalRuntime();
+}
+
+function teardownDecalRuntime() {
+  const rt = state.decal;
+  state.decal = null;
+  if (!rt) return;
+  try { rt.destroy(); } catch (_) { /* noop */ }
 }
 
 function loop() {
