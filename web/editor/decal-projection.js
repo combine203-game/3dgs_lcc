@@ -683,9 +683,13 @@ export function createDecalProjection({ adapter, getDecals, useShadowPass } = {}
        一帧 renderNextFrame；若这里不显式再请求主帧，默认 framebuffer 永远不再
        重绘，3DGS 画面就此消失，只剩 #mg-stage 的深色底 —— 即「进入编辑黑屏」。
        每帧请求一次主帧，保证 backBuffer 始终被主渲染覆盖；经节流后 <= maxFps。
-       ★ 没有实例时不请求：浏览态（展厅常驻页）不应该因为挂了一个空的贴花
-         管理器就变成永动 30fps 渲染。新增实例时 sync() 会补一帧。 */
-    if (manager.instances.size) requestThrottled();
+       ★ 必须无条件请求：一旦 pick pass 跑过，设备状态就停在「clearColor 白 +
+         离屏 renderTarget」，只有主渲染能把两者恢复。曾经试过「没实例就不请求」，
+         结果诊断脚本每次采样都读到 clearColor=1 且 framebuffer=offscreen
+         （画面本身没坏，但状态是脏的，真机上有白色闪帧风险）。
+       浏览态不想要这份常驻开销时，由 decal-runtime 的持有方在「没有可见贴花」
+         时直接 destroy 整个管理器（见 browse-annotations.js）。 */
+    requestThrottled();
   }
 
   let prerenderWarned = false;

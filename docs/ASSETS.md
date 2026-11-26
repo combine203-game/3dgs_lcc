@@ -8,8 +8,12 @@
 | 路径 | 体积 | 类型 | 获取方式 | 必需性 |
 |---|---|---|---|---|
 | `web/human/model/mmm_v6_soma_q8h.onnx` | 231.4 MB | ONNX 权重 | `node tools/fetch_hf_model.mjs q8h` | 数字人动作推理必需 |
-| `web/sog/mm_floor1_clean.sog` | 92.6 MB | SOG 点云 | 资产提供方 | 一层场景必需 |
-| `web/sog/mm_floor3_clean.sog` | 27.9 MB | SOG 点云 | 资产提供方 | 三层场景必需 |
+| `web/sog/mm_floor1.sog` | 112.9 MB | SOG 点云（原始 LOD0，默认加载） | 资产提供方 | 一层场景必需 |
+| `web/sog/mm_floor3.sog` | 33.1 MB | SOG 点云（原始 LOD0，默认加载） | 资产提供方 | 三层场景必需 |
+| `web/sog/floor1_masked/data/3dgs/*.sog` | 266.8 MB / 32 分块 | LOD 分块（超大高斯透明化，**默认加载**） | `tools/sog_mask_clean.py` | 流式加载必需 |
+| `web/sog/floor3_masked/data/3dgs/*.sog` | 74.4 MB / 9 分块 | 同上（三层，**默认加载**） | 同上 | 流式加载必需 |
+| `web/sog/floor{1,3}/data/3dgs/*.sog` | 381.3 MB | LOD 分块原始版（`?mask=0` 对照用） | XGrids `.lcc2` 工程 | 可选（对照） |
+| `web/sog/floor{1,3}/meta.lcc2`、`lod-meta.json` | 约 0.24 MB | 八叉树索引（索引很小，随仓库跟踪） | `tools/lcc2_build_scene.py` | 流式加载必需 |
 | `web/media/test.mp4` | 94.4 MB | 演示视频 | 资产提供方 | 贴花演示用 |
 | `web/human/vendor/ort/*.wasm` | 52.5 MB | ONNX Runtime Web | `npm i onnxruntime-web` | WebGPU 推理必需 |
 

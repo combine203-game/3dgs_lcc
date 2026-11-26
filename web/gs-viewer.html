@@ -56,13 +56,12 @@
     </nav>
 
     <div id="mg-controls" class="mg-controls">
-      <button type="button" id="mg-clean" class="mg-toggle mg-on" title="切换「已清理模糊高斯」场景（G）">
-        清理 <b id="mg-clean-state">开</b>
-      </button>
       <button type="button" id="mg-collision" class="mg-toggle mg-on" title="开关碰撞（C）">
         碰撞 <b id="mg-collision-state">开</b>
       </button>
       <button type="button" id="mg-map" class="mg-toggle mg-on" title="开关三维导航小地图（M）">小地图 <b id="mg-map-state">开</b></button>
+      <button type="button" id="mg-depth" class="mg-toggle" title="实时深度图视口（N）">深度 <b id="mg-depth-state">关</b></button>
+      <button type="button" id="mg-mesh" class="mg-toggle" title="碰撞 Mesh 深度视口（与 3DGS 深度并排对比）">Mesh深度 <b id="mg-mesh-state">关</b></button>
       <div class="mg-speed" title="WASD / 摇杆移动速度，自动记忆">
         <span>速度</span>
         <button type="button" id="mg-speed-down" aria-label="减速">−</button>
@@ -104,13 +103,14 @@
       <li><b>顶栏「局域网」</b> 查看并复制其他设备可用的访问地址（服务默认绑定 0.0.0.0）</li>
       <li><b>顶栏速度滑杆 / [ ]</b> 调节 WASD 与摇杆快慢（0.25×–4×，自动记忆）</li>
       <li><b>Shift / Ctrl</b> 按住临时加速 / 减速（引擎自带）</li>
-      <li><b>顶栏「清理」/ G</b> 在原始场景与模糊点清理版之间切换</li>
-      <li><b>顶栏「工具」/ T</b> 打开高斯清理、出生点标定与碰撞体调试面板</li>
+      <li><b>顶栏「工具」/ T</b> 打开资产信息、出生点标定与碰撞体调试面板</li>
       <li><b>B</b> 开关碰撞分块包围盒，<b>V</b> 开关碰撞网格线框（引擎内置）</li>
       <li><b>L</b> 开始/停止录制漫游，<b>P</b> 播放/停止路线（工具面板「漫游录制」）</li>
       <li><b>M</b> 或顶栏「小地图」按钮 显示/隐藏左下角三维导航小地图；在小地图上<b>拖动</b>旋转、<b>滚轮</b>缩放、双击复位</li>
+      <li><b>N</b> 或顶栏「深度」按钮 打开<b>3DGS 深度视口</b>（浮动窗，主画面不受影响）：当前相机视角的实时深度图（近亮远暗、品红＝无表面），<b>拖标题栏移动</b>、<b>拖右下角缩放</b>，再按一次关闭；视口底部图例可切换映射远界 15/30/60/120 m。视口区域不吃指针，旋转 / 漫游手势可穿过它继续操作主画面。<b>注意快捷键是 N 不是 D</b>——D 是 WASD 的「右移」，按住 D 漫游只会移动、不会关掉视口</li>
+      <li><b>顶栏「Mesh深度」</b> 再开一个<b>碰撞 Mesh 深度视口</b>（右侧，青绿边框）：把碰撞网格按同一机位、同一 near/far、同一对数映射渲成深度图，和 3DGS 深度并排比对 —— 两边不一致的地方就是「碰撞体表面」与「splat 表面」不贴合的地方（贴花投射 / 贴地漫游都吃这份几何）。首次打开会顺带打开 3DGS 视口</li>
     </ul>
-    <p>默认加载已清理模糊高斯的完整 LOD0 单文件 SOG（<code>mm_floor1_clean.sog</code> / <code>mm_floor3_clean.sog</code>）；碰撞网格取自原始 <code>meta.lcc2</code> 工程，官方米制 Z-up 顶点仅做 <code>world = (x, z, -y)</code> 轴变换，与 3DGS / 出生点 / 漫游路径同处一个米制世界。推荐使用 Chrome / Edge 并保持硬件加速开启：本机 <code>127.0.0.1</code> 访问默认使用 WebGPU；用局域网 IP 打开时因非安全上下文只能走 WebGL2，顶栏徽标会显示具体原因（安全上下文下可点击重试）。</p>
+    <p><b>默认加载流式 LCC</b>（合并自 viewer_stream）：官方 <code>.lcc2</code> 八叉树分块**原样**加载（<code>lcc2-sog-result/data/3dgs</code>，不做任何清理或遮罩），按视野 / LOD 距离按需请求，不再一次性下载整包。改动参数：<code>?source=sog</code> 回到原始未清理的单文件 SOG（<code>mm_floor1.sog</code> / <code>mm_floor3.sog</code>，可配 <code>?content=./sog/xxx.sog</code>）、<code>?budget=N</code> 覆盖渲染预算（百万点，一层默认 10M）、<code>?mask=1</code> 换「超大高斯透明化」对照版（远景会发暗，不建议）、<code>?stream=1</code> 显示流式观测 HUD、<code>?fullload=1</code> 跳过首帧粗档。两条链路的同机位画质对照见 <code>tools/compare_stream_vs_sog.mjs</code>（<code>tools/shots/stream_vs_sog*/</code>）。碰撞网格取自原始 <code>meta.lcc2</code> 工程，官方米制 Z-up 顶点仅做 <code>world = (x, z, -y)</code> 轴变换，与 3DGS / 出生点 / 漫游路径同处一个米制世界。推荐使用 Chrome / Edge 并保持硬件加速开启：本机 <code>127.0.0.1</code> 访问默认使用 WebGPU；用局域网 IP 打开时因非安全上下文只能走 WebGL2，顶栏徽标会显示具体原因（安全上下文下可点击重试）。</p>
   </aside>
 
   <aside id="mg-toolsbox" hidden>
@@ -169,8 +169,8 @@
       <pre id="mg-col-info">载入中…</pre>
     </div>
     <div class="mg-toolsection" data-section="clean" hidden>
-      <p class="mg-tooltip"><b>高斯清理</b>：<code id="mg-clean-info">—</code></p>
-      <p class="mg-tooltip">离线删除半径过大（大面积拖影）与不透明度过低（雾状半透明）的高斯点，颜色、朝向与球谐细节保持不变。顶栏「清理」按钮或 G 键可在原始 / 清理版之间切换对照。</p>
+      <p class="mg-tooltip"><b>当前资产</b>：<code id="mg-clean-info">—</code></p>
+      <p class="mg-tooltip">默认加载 splat-transform 从 <code>.lcc2</code> LOD0 直接导出的原始资产，未做过滤或尺度钳制。早前离线删除大半径 / 低不透明度高斯得到的 <code>*_clean.sog</code> 已不再默认使用（会让墙面 alpha 累积不足而发黑）；需要对照时用 <code>?content=./sog/xxx.sog</code> 显式指定。</p>
     </div>
     <div class="mg-toolsection" data-section="spawn" hidden>
       <p class="mg-tooltip"><b>出生点标定</b>：把当前视角设为「<span id="mg-tools-scene">1 层</span>」按钮对应的出生点，设置保存在本机浏览器，下次点该按钮自动生效；「复制位姿 URL」可把机位直接发给第三方。</p>
@@ -207,6 +207,38 @@
       <span id="mg-mm-pos">等待相机…</span>
       <span id="mg-mm-zone">载入导航图…</span>
     </div>
+  </aside>
+
+  <aside id="mg-depthbox" aria-label="实时深度图视口" hidden>
+    <div class="mg-dv-hd" id="mg-depth-drag" title="拖动移动深度视口">
+      <b>实时深度图</b>
+      <span class="mg-dv-tag">独立视口 · 拖标题移动 · 右下角缩放</span>
+      <button type="button" id="mg-depth-range-btn" title="切换映射远界（15/30/60/120 m）">30 m</button>
+      <button type="button" id="mg-depth-close" title="关闭（N）">×</button>
+    </div>
+    <div class="mg-dv-body" id="mg-depth-body" title="深度视口：渲染在独立区域，主画面不受影响"></div>
+    <div class="mg-dv-legend"><canvas id="mg-depth-canvas"></canvas></div>
+    <div class="mg-mm-ft mg-dv-ft">
+      <span id="mg-depth-stat">等待相机…</span>
+      <span id="mg-depth-range">—</span>
+    </div>
+    <div class="mg-dv-grip" id="mg-depth-grip" title="拖动缩放深度视口"></div>
+  </aside>
+
+  <aside id="mg-meshbox" aria-label="碰撞 Mesh 深度视口" hidden>
+    <div class="mg-dv-hd" id="mg-mesh-drag" title="拖动移动碰撞 Mesh 深度视口">
+      <b>碰撞 Mesh 深度</b>
+      <span class="mg-dv-tag">对比用 · 拖标题移动 · 右下角缩放</span>
+      <button type="button" id="mg-mesh-range-btn" title="切换映射远界（15/30/60/120 m）">30 m</button>
+      <button type="button" id="mg-mesh-close" title="关闭">×</button>
+    </div>
+    <div class="mg-dv-body" id="mg-mesh-body" title="碰撞网格深度：与 3DGS 深度同机位同映射，差异处即几何不贴合"></div>
+    <div class="mg-dv-legend"><canvas id="mg-mesh-canvas"></canvas></div>
+    <div class="mg-mm-ft mg-dv-ft">
+      <span id="mg-mesh-stat">等待碰撞体…</span>
+      <span id="mg-mesh-range">—</span>
+    </div>
+    <div class="mg-dv-grip" id="mg-mesh-grip" title="拖动缩放视口"></div>
   </aside>
 
   <div id="mg-error" hidden></div>

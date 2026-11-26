@@ -108,7 +108,7 @@ export function createPanel({ host, store, onAction, getState, getDecalDiag }) {
     </div>
 
     <div class="ed-wasd">
-      <b>WASD</b> 漫游 · 拖拽旋转视角 · 滚轮缩放 · 单击落点 · <b>双击</b> / <b>Enter</b> 结束绘制并回到「选择」 · <b>右键</b> 取消当前标注并回到「选择」 · <b>Shift+V/P/L/E/B/N/R/M</b> 切工具 · <b>Shift+C</b> 碰撞体 · <b>Esc</b> 取消选中
+      <b>WASD</b> 自由飞行 · 拖拽旋转视角 · 滚轮缩放 · 单击落点 · <b>双击</b> / <b>Enter</b> 结束绘制并回到「选择」 · <b>右键</b> 取消当前标注并回到「选择」 · <b>Shift+V/P/L/E/B/N/R/M</b> 切工具 · <b>Shift+C</b> 碰撞体 · <b>Esc</b> 取消选中
     </div>
 
     <aside class="ed-left">
@@ -404,7 +404,7 @@ export function createPanel({ host, store, onAction, getState, getDecalDiag }) {
     const screenBlock = a.kind === 'screen' ? `
       <div class="ed-sec-hd"><b>三维实体屏</b><small>固定世界朝向 · 视频播放</small></div>
       <label>视频地址<input data-media-field="url" value="${esc(mUrl)}" placeholder="留空播放内置演示画面；支持 mp4 / webm URL"></label>
-      <div class="ed-prop-hint">这是固定在世界空间里的一块显示屏：尺寸（米）与朝向由数据决定，<b>不随视角自动缩放或转正</b>；相机绕到侧面会看到透视收窄，走到背面显示金属背板。<b>选中后</b>拖动屏体可在相机平面内左右 / 上下移动，拖动六个圆手柄可沿上 / 下 / 左 / 右 / 前 / 后六个方向精确移动；单击（微抖 ≤6px）只选中，<b>不会改变位置</b>。填入视频 URL 后由屏内 &lt;video&gt; 直接循环播放。</div>
+      <div class="ed-prop-hint">这是固定在世界空间里的一块显示屏：尺寸（米）与朝向由数据决定，<b>不随视角自动缩放或转正</b>；相机绕到侧面会看到透视收窄，走到背面显示金属背板。<b>选中后</b>拖动屏体可在相机平面内左右 / 上下移动，拖动六个圆手柄可沿上 / 下 / 左 / 右 / 前 / 后六个方向精确移动；<b>屏体底部中心还有一枚旋转锚点</b>，左右拖 = 转向（yaw）、上下拖 = 俯仰（pitch），只改朝向不动位置；单击（微抖 ≤6px）只选中，<b>不会改变位置</b>。填入视频 URL 后由屏内 &lt;video&gt; 直接循环播放。</div>
       <div class="ed-sec-hd"><b>屏体尺寸 / 朝向</b><small>米 / 度</small></div>
       <label>宽度（米）<input type="number" min="0.3" max="20" step="0.1" data-field="sizeW" value="${esc(size.w)}"></label>
       <label>高度（米）<input type="number" min="0.2" max="20" step="0.1" data-field="sizeH" value="${esc(size.h)}"></label>
@@ -483,7 +483,7 @@ export function createPanel({ host, store, onAction, getState, getDecalDiag }) {
       <label class="ed-chk" title="开启后该标注被前方模型挡住时自动隐藏；关闭则始终置顶可见"><input type="checkbox" data-field="depthTest" ${a.depthTest ? 'checked' : ''}> 开启深度检测</label>
       <label class="ed-chk"><input type="checkbox" data-field="labelAlways" ${a.style.labelAlways ? 'checked' : ''}> 始终显示标签</label>
       <label class="ed-chk"><input type="checkbox" data-field="locked" ${a.locked ? 'checked' : ''}> 锁定</label>
-      <div class="ed-prop-hint">深度检测按<b>单个注记</b>生效：开启 = 被三维模型遮挡时隐藏；关闭 = 始终置顶显示。与工具栏「深度 开/关」不同，后者只决定绘制时落点是否贴合表面。</div>
+      <div class="ed-prop-hint">深度检测按<b>单个注记</b>生效，<b>新标注默认开启</b>：开启 = 被三维模型遮挡时隐藏；关闭 = 始终置顶显示。与工具栏「深度 开/关」不同，后者只决定绘制时落点是否贴合表面。</div>
       <div class="ed-coord">${a.points.map((p, i) => `<code>P${i + 1} ${p.map(n => n.toFixed(2)).join(', ')}</code>`).join('')}</div>
       <div class="ed-prop-btns">
         <button data-act="saveview" data-v="${a.id}">存当前机位</button>

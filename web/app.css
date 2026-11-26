@@ -20,8 +20,6 @@ button{font-family:inherit}
 #mg-scenes{display:flex;gap:8px;flex:1;min-width:0}
 /* 嵌入首页：隐藏与首页楼层导航重复的场景切换按钮 */
 .mg-embed #mg-scenes{display:none}
-/* 干净部署包只含已清理版 SOG，去掉无实际作用的「清理」开关 */
-#mg-clean{display:none}
 .mg-scene{flex:1;min-width:0;padding:7px 11px;text-align:left;cursor:pointer;border-radius:8px;
   border:1px solid var(--mg-line);background:#1a2230;color:var(--mg-fg);transition:.16s}
 .mg-scene span{display:block;font-size:13px;font-weight:600}
@@ -217,6 +215,47 @@ body.mg-video #mg-stage{position:fixed;inset:0}
   .mg-mm-hd button{padding:3px 4px}
 }
 
+/* ===== 实时深度图 · 独立视口（两个来源：3DGS / 碰撞 Mesh） =====
+   不整幅替换主画面：深度只在 .mg-dv-body 这块矩形里渲染（画布上对应的区域），
+   标题栏可拖动移动、右下角手柄可拖动缩放。.mg-dv-body 必须保持透明且
+   pointer-events:none —— 透明才能露出底下画布里的深度，pointer-events:none
+   才能让旋转 / 漫游手势穿过视口继续操作主画面。
+   两个视口取数口径与着色映射完全一致（近亮远暗、无表面品红），并排即可比对
+   「碰撞体表面」与「splat 表面」是否贴合。 */
+#mg-depthbox,#mg-meshbox{position:absolute;bottom:18px;
+  width:min(430px,calc(50vw - 190px));height:300px;
+  display:flex;flex-direction:column;border-radius:10px;overflow:hidden;
+  box-shadow:0 14px 42px rgba(0,0,0,.55);box-sizing:border-box;z-index:33}
+#mg-depthbox{left:332px;border:1px solid rgba(96,150,220,.55)}
+#mg-meshbox{right:18px;border:1px solid rgba(110,214,190,.6)}
+#mg-depthbox[hidden],#mg-meshbox[hidden]{display:none}
+.mg-dv-hd{flex:0 0 auto;display:flex;align-items:center;gap:7px;height:30px;padding:0 8px;
+  background:rgba(13,20,30,.94);border-bottom:1px solid var(--mg-line);
+  cursor:move;user-select:none;touch-action:none}
+.mg-dv-hd>b{font-size:11px;letter-spacing:.4px;white-space:nowrap}
+.mg-dv-tag{flex:1;min-width:0;font-size:10px;color:var(--mg-dim);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mg-dv-hd button{padding:3px 6px;font-size:10px;line-height:1.2;cursor:pointer;border-radius:5px;
+  border:1px solid var(--mg-line);background:#1d2838;color:var(--mg-dim)}
+.mg-dv-hd button:hover{background:#2a3b52;color:var(--mg-fg)}
+/* 透明视口：深度由 GPU 在画布上这块矩形内绘制，这里只占位 + 让指针穿透 */
+.mg-dv-body{flex:1 1 auto;min-height:40px;background:transparent;pointer-events:none}
+.mg-dv-legend{flex:0 0 auto;padding:4px 6px 2px;background:rgba(13,20,30,.94)}
+#mg-depth-canvas{display:block;width:100%;height:30px}
+.mg-dv-ft{border-top:1px solid var(--mg-line);background:rgba(13,20,30,.94);padding:4px 8px}
+.mg-dv-grip{position:absolute;right:0;bottom:0;width:18px;height:18px;cursor:nwse-resize;
+  touch-action:none;z-index:3;
+  background:linear-gradient(135deg,transparent 0,transparent 52%,rgba(140,180,230,.8) 52%)}
+@media (max-width:820px){
+  #mg-depthbox,#mg-meshbox{bottom:10px;width:min(72vw,360px);height:min(42vh,260px)}
+  #mg-depthbox{left:10px}
+  #mg-meshbox{right:10px}
+  #mg-depth-canvas,#mg-mesh-canvas{height:26px}
+}
+@media (max-width:480px){
+  #mg-depthbox,#mg-meshbox{width:min(86vw,320px)}
+}
+
 /* ===== 浏览态标注层（browse-annotations.js） =====
    复用编辑器 Overlay 的 .ed-* 结构只为还原同一套视觉效果；浏览态是**只读**的：
    整层与全部后代一律关闭指针事件，绝不抢走引擎的旋转 / 平移 / 滚轮 / 漫游手势，
@@ -234,6 +273,13 @@ body.mg-video #mg-stage{position:fixed;inset:0}
 /* 顶栏、浮层与小地图由父页面接管；DOM 仍保留，按钮可被父页面 click 触发 */
 .mg-bare #mg-bar,.mg-bare #mg-minimap,.mg-bare #mg-helpbox,
 .mg-bare #mg-toolsbox,.mg-bare #mg-lanbox,.mg-bare #mg-error{display:none!important}
+/* 展厅页顶栏被 .mg-bare 隐藏，深度视口改由父页「三维功能控制台」开关；
+   视口本身要留着（映射区间、× 退出、拖动缩放都在它身上），
+   位置抬高一点避开父页底部导览条。 */
+.mg-bare #mg-depthbox{left:auto;right:14px;bottom:76px;width:min(62vw,460px);height:min(52vh,330px);z-index:33}
+/* 碰撞 Mesh 视口贴在 3DGS 视口左侧：两个一起开就是并排对比 */
+.mg-bare #mg-meshbox{left:auto;right:calc(min(62vw,460px) + 26px);bottom:76px;
+  width:min(52vw,420px);height:min(50vh,320px);z-index:33}
 .mg-bare #mg-app{height:100%}
 .mg-bare #mg-stage{height:100%}
 

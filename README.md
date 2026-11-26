@@ -35,7 +35,8 @@ start.bat
 | 资产 | 体积 | 获取方式 |
 |---|---|---|
 | MotionBricks 动作模型 `mmm_v6_soma_q8h.onnx` | 231 MB | `node tools/fetch_hf_model.mjs q8h` |
-| SOG 高斯点云 `mm_floor1_clean.sog` / `mm_floor3_clean.sog` | 120 MB | 需从资产提供方获取 |
+| .lcc2 流式分块 `floor{1,3}_masked/data/3dgs/*.sog`（**默认加载**，另含未遮罩版 381 MB） | 723 MB | 需从资产提供方获取 |
+| SOG 高斯点云 `mm_floor1.sog` / `mm_floor3.sog`（原始 LOD0，`?source=sog` 回落） | 146 MB | 需从资产提供方获取 |
 | 演示视频 `web/media/test.mp4` | 94 MB | 需从资产提供方获取 |
 | ONNX Runtime Web WASM | 53 MB | `npm i onnxruntime-web` |
 

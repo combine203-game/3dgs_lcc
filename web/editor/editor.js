@@ -153,6 +153,18 @@ export async function mount(opts = {}) {
   const ac = new AbortController();
   // 进编辑前引擎自带的碰撞网格开关值；卸载时原样还回去，不污染浏览态
   const prevMeshOverlay = !!viewer.state?.collisionOverlayEnabled;
+  // 进编辑前的相机模式（walk / fly）：编辑器默认切 fly，退出时还原
+  const prevCameraMode = viewer.state?.cameraMode || null;
+  /* 编辑期「无碰撞飞行」：引擎的 fly 控制器同样挂着碰撞体（cameraManager /
+     inputController / XR / 导航光标吃的是同一份 MeshCollision），只切 fly 不够 ——
+     贴墙布点、穿门取景时相机仍会被墙体推开。这里把碰撞从相机控制器上摘掉。
+     只摘挂、不销毁：viewer.collision() 仍返回同一个 MeshCollision，
+     落点拾取 / 贴地 / 贴花深度反算全部照旧。退出编辑器再挂回去。 */
+  const prevCollision = !!viewer.state?.hasCollision;
+  let collisionDetached = false;
+  if (prevCollision) {
+    try { collisionDetached = viewer.setCollisionEnabled?.(false) === true; } catch (_) { collisionDetached = false; }
+  }
 
   /** 全局碰撞体 MESH 显示：优先走同文档的调试模块（能处理异步 attach），
    *  否则直接写引擎的响应式 state（会触发 collisionOverlayEnabled:changed）。 */
@@ -223,6 +235,80 @@ export async function mount(opts = {}) {
     }
   }
 
+  /* ---------------------------------------------------------------- 动线贴地（与贴花同源）
+   *
+   * 只算一次、算完写回注记（a.drape / a.drapeMeta）：
+   *   · 结果与相机无关 → 可持久化 → 浏览态直接照抄就能贴地，不需要任何拾取能力；
+   *   · 不进撤销栈（store.update 的 noUndo）→ Ctrl+Z 撤销的是「我画的线」，
+   *     而不是看不见的贴地重算；
+   *   · 异步串行排队，深度反算是逐像素 GPU readback，绝不能并发几十条。
+   *
+   * 失效判据 = 原始顶点签名 + 拾取版本号（碰撞网 / 场景换了才需重算）。
+   */
+  const DRAPE_STEP = 0.9;
+  const DRAPE_MAX_SAMPLES = 64;
+  const drapeQueue = { busy: false, timer: 0, running: null };
+
+  function pointsSig(a) { return JSON.stringify(a.points || []); }
+
+  function needsDrape(a, v) {
+    if (!a || a.kind !== 'line' || a.visible === false) return false;
+    if (!Array.isArray(a.points) || a.points.length < 2) return false;
+    const m = a.drapeMeta;
+    return !m || m.pointsSig !== pointsSig(a) || m.v !== v;
+  }
+
+  function scheduleDrape(delay = 400) {
+    clearTimeout(drapeQueue.timer);
+    drapeQueue.timer = setTimeout(runDrapeQueue, delay);
+  }
+
+  function runDrapeQueue() {
+    // 已在跑：把同一个 Promise 交出去（调用方 await 到的就是「这一轮算完」，
+    // 而不是在忙时直接空返回 —— 否则诊断 / 外部调用会误判成「没有需要贴地的线」）
+    if (drapeQueue.busy) return drapeQueue.running || Promise.resolve();
+    if (state.preview) return Promise.resolve();
+    drapeQueue.busy = true;
+    drapeQueue.running = (async () => {
+      try {
+        for (;;) {
+          const v = picker.drapeVersion;
+          const a = store.list(state.scene).find(x => needsDrape(x, v));
+          if (!a) break;
+          const sig = pointsSig(a);
+          let res = null;
+          try {
+            res = await picker.drapePolylineDepth(a.points, DRAPE_STEP, { maxSamples: DRAPE_MAX_SAMPLES });
+          } catch (e) { res = null; }
+          const cur = store.get(a.id);
+          if (!cur) continue;                                // 排队期间被删掉
+          if (!res || !Array.isArray(res.points) || res.points.length < 2 || res.source === 'none') {
+            /* 没有任何真实命中（无深度图 / 相机看不到这条线 / 拾取全部失败）：
+               绝不要写一份「看着像贴地、其实是原始悬空点」的假结果 —— 那会让
+               后续判断以为已经贴好了。只落一个 meta 防止「算不出来 → 立刻再排」
+               的死循环，drape 保持空，渲染继续走原始折线。 */
+            store.update(a.id, {
+              drapeMeta: { pointsSig: sig, v, source: 'none', at: Date.now() }
+            }, { noUndo: true });
+            continue;
+          }
+          const q = (n) => Math.round(Number(n) * 1000) / 1000;
+          store.update(a.id, {
+            drape: res.points.map(p => [q(p[0]), q(p[1]), q(p[2])]),
+            drapeMeta: {
+              pointsSig: sig, v, step: res.step, samples: res.samples,
+              source: res.source, stats: res.stats || null, at: Date.now()
+            }
+          }, { noUndo: true });
+        }
+      } finally {
+        drapeQueue.busy = false;
+        drapeQueue.running = null;
+      }
+    })();
+    return drapeQueue.running;
+  }
+
   const overlay = new Overlay({
     host: stage,
     getViewer: () => window.__viewer,
@@ -238,6 +324,14 @@ export async function mount(opts = {}) {
       if (!a || a.locked) return;
       // 双击标注（overlay / SVG 直接派发 dblclick 的路径）= 回到标注机位。
       if (mode === 'fly') { action('fly', id); return; }
+      /* 用户直接点中已有对象 = 进入「对象交互」，此时必须退出绘制工具。
+         否则在绘制工具（Point / 动线 / 展板…）下选中一个对象后，下一次点空白处
+         会继续落点、又新建一个标注（用户反馈：选中交互时不该能新建）。
+         工具切回选择会同时丢弃未完成草稿；要接着画重新按工具快捷键即可。 */
+      if (state.tool !== 'select') {
+        action('tool', 'select');
+        panel.status('已选中对象：退出绘制工具（继续绘制请重新选择工具）');
+      }
       // 多选：Shift/Ctrl/Cmd + 点击 = 在选集中切换成员（Figma/Miro 式加选 / 减选）；
       // 普通点击 = 替换为单选。空白处取消 / Shift+拖拽框选由编辑器在 stage 层处理。
       const toggle = !!(mods && (mods.shift || mods.ctrl || mods.meta));
@@ -282,6 +376,14 @@ export async function mount(opts = {}) {
       const p = [start[0] + delta[0], start[1] + delta[1], start[2] + delta[2]];
       store.update(id, { points: [p] }, { coalesceKey: 'screen-move:' + id });
     },
+    // 三维实体屏底心旋转锚点：只改朝向（yaw / pitch），位置不动；一次拖动一条撤销
+    onScreenRotate: (id, rot) => {
+      if (state.preview) return;
+      const a = store.get(id);
+      if (!a || a.locked) return;
+      store.update(id, { style: { yaw: rot.yaw, pitch: rot.pitch } },
+        { coalesceKey: 'screen-rot:' + id });
+    },
     isEditable: () => !state.preview,
     // 「选中即锁定其余对象」的设计已废弃（与多选冲突）：锁定只来自标注自身的 locked 字段，
     // 不再因「有选中对象」而锁死其它对象，否则无法 Shift+点击加选 / 框选。
@@ -293,6 +395,8 @@ export async function mount(opts = {}) {
     drapeVersion: () => picker.drapeVersion,
     // 逐注记深度检测：开启后被前方模型遮挡的标注才隐藏
     isOccluded: (p) => picker.occluded(p),
+    // 辅助线深度判断：贴花 OBB / 视锥体棱 / 旋转环逐段判定「是否在墙后被挡住」
+    probeOcclusion: (pts, opt) => picker.probeOcclusion(pts, opt),
   });
   overlay.start();
 
@@ -337,7 +441,9 @@ export async function mount(opts = {}) {
   // ------------------------------------------------------------ 鼠标接管（捕获阶段）
   function onUI(target) {
     return !!(target?.closest?.('.ed-ui, .ed-item, .ed-shape, .ed-flow-arrow-seg, ' +
-      '.ed-decal-cell, .ed-decal-video, .ed-decal-obb-handle, .ed-screen-gizmo'));
+      '.ed-flow-chain, .ed-label, .ed-draft, .ed-draft-halo, .ed-draft-handles, ' +
+      '.ed-decal-cell, .ed-decal-video, .ed-decal-obb-handle, .ed-screen-gizmo, ' +
+      '.ed-screen-rot'));
   }
 
   stage.addEventListener('pointerdown', e => {
@@ -686,10 +792,10 @@ export async function mount(opts = {}) {
     }
     const token = (decalTokens.get(id) || 0) + 1;
     decalTokens.set(id, token);
-    /* 单点 pick 超时：真机 picker 正常 <100ms 返回，900ms 足够；
-       无头 SwiftShader 下 CPU readback 挂死时用较短超时快速退化到碰撞 mesh，
-       避免 49 点×多批累计几十秒（曾导致投影机长时间写不回、贴花不显示）。 */
-    const grid = await picker.unprojectRect(a.rect, 6, 6, { pickTimeout: 900 });
+    /* 网格密度：过去 6×6 是因为「每个点一次 GPU 回读」，点多就慢到秒级。
+       unprojectRect 现在改走「一次快照 + 一次块回读」快路径，采样点多到 9×9
+       也不增加回读次数，表面弯曲更准。pickTimeout 只对旧引擎的慢路径生效。 */
+    const grid = await picker.unprojectRect(a.rect, 9, 9, { pickTimeout: 900 });
     const cur = store.get(id);
     if (!cur || decalTokens.get(id) !== token) return;
     if (!grid) {
@@ -749,7 +855,8 @@ export async function mount(opts = {}) {
     const shadowInfo = (decalMgr && decalMgr.shadowPathSupported)
       ? ' · GPU 深度图 Pass1（正交投影仪）'
       : (projector.shadow ? ` · 深度图 ${projector.shadow.n}²（${projector.shadow.hits} 命中）` : ' · 深度图不可用(回退旧口径)');
-    panel.status(`贴面矩形已生成投影机 OBB · 宽 ${(projector.half[0] * 2).toFixed(2)}m × 高 ${(projector.half[1] * 2).toFixed(2)}m${shadowInfo}`);
+    panel.status(`贴面矩形已生成投影机 OBB · 宽 ${(projector.half[0] * 2).toFixed(2)}m × 高 ${(projector.half[1] * 2).toFixed(2)}m${shadowInfo}` +
+      ` · 表面反算 ${grid.samples} 点/${grid.readbacks ?? '?'} 次回读 ${grid.ms ?? '?'}ms`);
   }
 
   /** 示例数据 / 旧文档里只带 rect 或 surface、没有 projector 的贴面，挂载后自动补算一次。
@@ -1153,6 +1260,8 @@ export async function mount(opts = {}) {
     if (state.selectedIds.length && !state.selectedIds.every(id => store.get(id)))
       state.selectedIds = state.selectedIds.filter(id => store.get(id));
     ensureDecalProjectors(); syncDecals(); panel.render(getState());
+    // 顶点 / 新绘制 / 撤销重做之后都要重算动线贴地（防抖，且只算「签名过期」的那几条）
+    scheduleDrape();
   };
   store.addEventListener('change', onChange);
   // 持久化失败（最常见是 localStorage 配额超限）给出可见告警，避免「静默丢数据」
@@ -1162,7 +1271,7 @@ export async function mount(opts = {}) {
     else panel.status('⚠ 保存失败：' + (d.message || '未知错误'));
   });
   panel.render(getState());
-  panel.status('编辑模式就绪 · WASD 漫游 / Shift+字母切工具 / 场景内点击落点');
+  panel.status('编辑模式就绪 · WASD 自由飞行（无碰撞，可穿墙）/ Shift+字母切工具 / 场景内点击落点');
 
   // ------------------------------------------------------------ UI 与三维场景彻底隔离
   // 鼠标在工具栏 / 图层 / 标注列表 / 属性面板里交互时，绝不联动三维场景：
@@ -1184,11 +1293,54 @@ export async function mount(opts = {}) {
   // 画布尺寸一就绪就补算示例 / 历史贴面的深度表面网格
   setTimeout(ensureDecalProjectors, 500);
 
+  /* ---------------------------------------------------------------- 相机：编辑器默认「自由飞行」
+   *
+   * 浏览态默认是 walk（碰撞漫游，胶囊被钉在离地 1.6m，且会被墙体挡住），
+   * app.js 还会在碰撞体加载完成后自动切 walk。编辑时要贴着墙面画贴花、
+   * 要能升到高处俯视布点，walk 姿态非常碍事 —— 所以进编辑器强制 fly：
+   *   · globalThis.__mgEditorFly 让 app.js 的自动切 walk 轮询停手；
+   *   · 退出编辑器时把进来前的模式还回去，不污染浏览态。
+   */
+  globalThis.__mgEditorFly = true;
+  function forceFlyCamera() {
+    const st = viewer.state;
+    if (!st) return false;
+    if (st.cameraMode === 'fly') return true;
+    // walk -> fly：引擎有 toggleWalk 就走官方切换（内部同步控制器 / 指针锁），
+    // 否则直接写响应式 state（walk-controls.js 关碰撞时用的也是这条路径）。
+    if (st.cameraMode === 'walk' && typeof viewer.toggleWalk === 'function') {
+      try { viewer.toggleWalk(); } catch (_) { /* 落到下面兜底 */ }
+    }
+    if (st.cameraMode !== 'fly') {
+      try { st.cameraMode = 'fly'; } catch (_) { return false; }
+    }
+    return st.cameraMode === 'fly';
+  }
+  function restoreCameraMode() {
+    globalThis.__mgEditorFly = false;
+    const st = viewer.state;
+    if (!st || !prevCameraMode) return;
+    // 只在「用户没在编辑期间手动改过模式」时还原，避免覆盖用户的显式选择
+    if (st.cameraMode === 'fly' && prevCameraMode === 'walk' && st.hasCollision && st.walkAllowed) {
+      try { st.cameraMode = 'walk'; } catch (_) { /* noop */ }
+    }
+  }
+  forceFlyCamera();
+
   function unmount() {
     ac.abort();
     clearTimeout(tourTimer);
+    clearTimeout(drapeQueue.timer);
+    clearInterval(drapePoll);
     // 退出编辑：把引擎的碰撞网格开关恢复到进编辑前的值，浏览态不被污染
     if (state.meshVisible) setMeshVisible(prevMeshOverlay);
+    // 先把碰撞挂回去（restoreCameraMode 判 walk 时要看 hasCollision / walkAllowed），
+    // 再还原相机模式（编辑期是强制飞行）
+    if (collisionDetached) {
+      try { viewer.setCollisionEnabled?.(true); } catch (_) { /* noop */ }
+      collisionDetached = false;
+    }
+    restoreCameraMode();
     store.removeEventListener('change', onChange);
     overlay.stop(); overlay.destroy();
     panel.destroy();
@@ -1199,8 +1351,22 @@ export async function mount(opts = {}) {
     session = null;
   }
 
+  /* 碰撞 MESH / 深度图是异步就绪的：drapeVersion 变了（或首次从 0 变成字符串）
+     就说明「表面」变了，需要把动线重贴一次。低频轮询足够，且 needsDrape 会在
+     没有任何过期项时立刻空转返回（零开销）。 */
+  const drapePoll = setInterval(() => {
+    if (state.preview || drapeQueue.busy) return;
+    const v = picker.drapeVersion;
+    if (store.list(state.scene).some(a => needsDrape(a, v))) scheduleDrape(80);
+  }, 2000);
+
   // decalMgr 暴露给诊断脚本：debug() 返回 pickReady / degraded / GPU 错误计数
-  const api = { store, picker, overlay, panel, getState, action, unmount, viewer, decalMgr };
+  const api = {
+    store, picker, overlay, panel, getState, action, unmount, viewer,
+    /** 诊断 / 回归用：立刻跑一遍贴地队列，返回 Promise（算完即持久化到 a.drape） */
+    redrape: () => { clearTimeout(drapeQueue.timer); return runDrapeQueue(); },
+    decalMgr
+  };
   session = { api };
   window.__mgEditor = api;
   return api;

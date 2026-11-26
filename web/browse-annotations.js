@@ -167,7 +167,8 @@ const state = {
   standalone: false,
   // 贴花 GPU 投射运行时（浏览态唯一负责「把视频投到场景表面」的东西）
   decal: null,
-  decalTryAt: 0
+  decalTryAt: 0,
+  dbg: { loops: 0, hidden: 0, editorOn: 0, noOverlay: 0, lastErr: null }
 };
 
 const isEditorOn = () => {
@@ -257,7 +258,10 @@ function ensureDecalRuntime() {
   if (now - state.decalTryAt < 500) return null;
   state.decalTryAt = now;
   const v = window.__viewer;
-  if (!v?.app || !v.picker) return null;
+  // app.scene 是「真实引擎已启动」的判据（headless / 测试替身没有 scene，
+  // 适配器 isReady() 也会因此返回 false —— 这里提前拦掉，避免每 500ms 造一次
+  // 注定被禁用的管理器）。
+  if (!v?.app || !v.app.scene || !v.picker) return null;
   const rt = createDecalRuntime({
     getViewer: () => window.__viewer,
     listDecals: decalList
@@ -268,8 +272,15 @@ function ensureDecalRuntime() {
 }
 
 function syncDecalRuntime() {
-  if (state.decal) { try { state.decal.sync(); } catch (_) { /* noop */ } }
-  else ensureDecalRuntime();
+  if (state.decal) {
+    /* 贴花被全部隐藏 / 删除时必须整体卸载：投射器一旦启用就会驱动按需渲染
+       循环，展厅常驻页不能因为「曾经有过贴花」而一直空转。之后只要有可见
+       贴花，下一帧的 ensureDecalRuntime() 会自动重建。 */
+    if (!hasDecals()) { teardownDecalRuntime(); return; }
+    try { state.decal.sync(); } catch (_) { /* noop */ }
+    return;
+  }
+  ensureDecalRuntime();
 }
 
 function teardownDecalRuntime() {
@@ -281,19 +292,23 @@ function teardownDecalRuntime() {
 
 function loop() {
   state.raf = requestAnimationFrame(loop);
-  if (document.hidden) return;
+  state.dbg.loops++;
+  if (document.hidden) { state.dbg.hidden++; return; }
   if (isEditorOn()) {                       // 双保险：桥接事件之外的兜底
+    state.dbg.editorOn++;
     if (state.overlay) teardownOverlay();
     if (state.decal) teardownDecalRuntime();
     return;
   }
   try {
     const ov = state.overlay || ensureOverlay();
+    if (!ov) state.dbg.noOverlay++;
     ov?.frame();
     // 引擎 / Picker 就绪后才建：就绪前每次都会早退，代价只是一次时间戳比较
     if (!state.decal) ensureDecalRuntime();
   } catch (err) {
     state.failAt = Date.now();
+    state.dbg.lastErr = String(err && err.message || err);
     teardownOverlay();
     console.warn('[browse-ann] 叠加层渲染异常，已降级：', err);
   }
@@ -548,13 +563,36 @@ window.__mgBrowseAnn = {
     nodes: state.overlay ? state.overlay.nodes.size : 0,
     editor: isEditorOn(),
     panel: !!(state.panel && state.panel.isOpen()),
-    docSig: state.sig
+    docSig: state.sig,
+    // 叠加层为什么不建：rAF 循环是否在跑 / 是否处于异常冷却 / 页面是否被判定隐藏
+    raf: !!state.raf,
+    hidden: (() => { try { return document.hidden; } catch (_) { return null; } })(),
+    failAge: state.failAt ? Date.now() - state.failAt : null,
+    stage: !!document.getElementById('mg-stage'),
+    viewerApp: !!window.__viewer?.app,
+    dbg: { ...state.dbg }
   }),
   /** 贴花投射诊断：enabled / instances / pickReady / degraded / gpuErrors。
    *  浏览态「看不到投射视频」的排查入口（与编辑器 decalMgr.debug() 同口径）。 */
   decalStats: () => (state.decal ? state.decal.stats() : state.decal),
   /** 强制重喂一次投射实例（诊断 / 父页在外部改动文档后调用） */
   syncDecals: () => { syncDecalRuntime(); return 1; },
+  /** 诊断用：同步推进一帧叠加层。
+   *  headless / 软件光栅下 7M+ 高斯的单帧可低至数秒，rAF 循环在断言窗口内可能
+   *  一帧都没轮到（dbg.noOverlay 一直涨）；这里把 loop() 的同一套逻辑同步跑一次，
+   *  断言前调用即可避免「叠加层循环已死」这类假失败。 */
+  tick: () => {
+    try {
+      const ov = state.overlay || ensureOverlay();
+      ov?.frame();
+      return !!ov;
+    } catch (err) {
+      state.failAt = Date.now();
+      state.dbg.lastErr = String(err && err.message || err);
+      teardownOverlay();
+      return false;
+    }
+  },
   /** DOM 断言辅助：叠加层根节点是否挂在 #mg-stage 上 */
   layerEl: () => document.querySelector('#mg-stage .mg-ann-layer') || null
 };

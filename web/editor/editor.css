@@ -39,8 +39,12 @@
   cursor: grab;
 }
 .ed-board:active { cursor: grabbing; }
+/* 内容按固定设计尺寸（--bw/--bh）排版，再整体 scale(--s)：
+   展板显示尺寸由锚点深度决定（真实透视），排版本身不随之压缩。 */
 .ed-board-in {
-  position: relative; height: 100%; overflow: hidden;
+  position: relative; overflow: hidden;
+  width: var(--bw, 320px); height: var(--bh, 240px);
+  transform: scale(var(--s, 1)); transform-origin: 0 0;
   display: flex; flex-direction: column;
   background:
     linear-gradient(155deg, color-mix(in srgb, var(--c) 16%, #05131dee) 0%, #04101ae8 55%, #020a12f2 100%);
@@ -678,6 +682,35 @@ html.mg-editor-on #mg-stage { cursor: crosshair; }
 }
 .ed-g.ed-sel .ed-decal-obb-handle { stroke-width: 2.4; }
 
+/* 辅助线的「场景深度判断」：被前方表面挡住的那几段走虚线 + 压低透明度。
+   不直接隐藏 —— 用户仍需要看清整个体积的形状，只是能一眼分辨
+   「这段在墙前（可拖）」与「这段埋在墙后（别拖）」。 */
+.ed-decal-obb-seg.is-blocked {
+  stroke-dasharray: 3 5; stroke-opacity: .30;
+  filter: none;
+}
+
+/* 旋转环：X/Y/Z 三色，半径不同所以屏幕上不重叠，不抢彼此鼠标 */
+.ed-decal-obb-rings { pointer-events: none; }
+.ed-decal-ring {
+  fill: none; stroke-width: 1.8; stroke-linecap: round;
+  stroke: #9be7ff; pointer-events: none;
+}
+.ed-decal-ring[data-axis="rx"] { stroke: #ff6b81; }
+.ed-decal-ring[data-axis="ry"] { stroke: #57d977; }
+.ed-decal-ring[data-axis="rz"] { stroke: #4fa8ff; }
+.ed-decal-ring.is-blocked {
+  stroke-dasharray: 3 5; stroke-opacity: .28;
+}
+/* 命中区：一条透明粗描边 polyline。环本身很细（1.8px）点不中，
+   所以叠一条 14px 的透明线专门接事件，不参与视觉。 */
+.ed-decal-ring-hit {
+  fill: none; stroke: transparent; stroke-width: 14;
+  pointer-events: stroke; cursor: grab;
+}
+.ed-decal-ring-hit:active { cursor: grabbing; }
+.ed-decal-ring-hit[data-axis="rx"] { stroke: transparent; }
+
 /* ---------------- 贴面深度反算状态 ---------------- */
 .ed-prop-status {
   margin: 2px 0 8px; padding: 6px 8px; border-radius: 4px;
@@ -739,6 +772,21 @@ html.mg-editor-on #mg-stage { cursor: crosshair; }
   border-radius: 3px; pointer-events: none;
 }
 .ed-item.ed-screen.ed-sel { cursor: move; }
+
+/* 三维屏底心旋转锚点（绕底心转向 yaw / 俯仰 pitch） */
+.ed-screen-rot {
+  position: absolute; width: 34px; height: 34px; margin: -17px 0 0 -17px;
+  z-index: 13; pointer-events: none; filter: drop-shadow(0 0 5px #22d3ee);
+}
+.ed-screen-rot-ring { fill: #04131ce6; stroke: #22d3ee; stroke-width: 1.6; }
+.ed-screen-rot-arc {
+  fill: none; stroke: #bff2ff; stroke-width: 2.2; stroke-linecap: round;
+  stroke-dasharray: 22 8;
+}
+.ed-screen-rot-head { fill: #bff2ff; }
+.ed-screen-rot-hit { fill: transparent; stroke: transparent; cursor: grab; pointer-events: all; }
+.ed-screen-rot-hit:hover { fill: #ffffff26; }
+.ed-screen-rot-hit:active { cursor: grabbing; }
 
 /* ---------------- 右键上下文菜单（Figma / Miro 式对象操作） ---------------- */
 .ed-ctx {

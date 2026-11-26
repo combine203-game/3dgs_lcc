@@ -8,7 +8,7 @@
 |---|---|
 | 工程根 | `D:\WorkSpace\AI\3DGS_build\viewer_edit`（Git Bash: `/d/WorkSpace/AI/3DGS_build/viewer_edit`） |
 | 站点根 | `<root>/web`（`serve.py` 把 URL 直接映射到该目录） |
-| 场景数据 | `web/sog/mm_floor1_clean.sog`(92.6 MB)、`web/sog/mm_floor3_clean.sog`(28 MB) |
+| 场景数据 | 默认 `web/sog/<scene>_masked/` 的 .lcc2 八叉树分块流式（一层 266.8 MB / 32 块、三层 74.4 MB / 9 块，按视野按需请求）；`?source=sog` 回落到原始未清理的单文件 `mm_floor1.sog`(112.9 MB) / `mm_floor3.sog`(33.1 MB) |
 | 现有文档 | `docs/EDITOR.md`(43 KB)、`docs/DECAL_TECH_ROUTE.md` |
 
 ## 2. 技术栈与版本

@@ -132,6 +132,8 @@ export const ADAPTER_CONTRACT = [
     desc: '销毁 createMesh 创建的网格句柄。' },
 
   // ---- F. 拾取与数学 (6) ----
+  { group: 'picking', name: 'getCameraViewProjection', params: [], returns: 'Float32Array|null',
+    desc: '取得主相机当前帧的 projection × view（列主序 + 列向量约定，不转置）。供 CPU 光栅化等确定性计算与 GPU 侧同口径对齐。' },
   { group: 'picking', name: 'getDepthPickView', params: [], returns: 'object|null',
     desc: '取得可用于深度重建的拾取视图。返回 { texture, width, height, renders } 或 null（该引擎不提供时返回 null，调用方需有降级路径）。' },
   { group: 'picking', name: 'getPickingBackend', params: [], returns: 'string',
@@ -160,6 +162,11 @@ export const ADAPTER_CONTRACT = [
     desc: '取得投影仪正交相机 ViewProj，列主序 + 列向量约定，供 Pass3 VS/FS 使用。' },
   { group: 'renderpass', name: 'destroyDepthPass', params: ['pass'], returns: 'void',
     desc: '销毁通道的相机实体、绘制层、深度纹理与网格。' }
+
+  /* 碰撞 mesh 深度**不再走引擎离屏通道**：自建 Layer + 自建相机在这个构建里
+     只清屏不提交 draw（贴花 Pass1 同坑）。现在由 web/mesh-depth-raster.js 在 CPU
+     上按主相机 ViewProj 光栅化，再用 texture 组的 createDataTexture /
+     updateDataTexture 上传 RGBA8，所以契约只需 getCameraViewProjection。 */
 ];
 
 /** 契约分组（用于文档与断言） */

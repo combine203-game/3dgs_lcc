@@ -65,7 +65,7 @@ node tools/verify_editor.mjs                                           # 原功�
 ```
  gs-viewer.html?scene=floor3&human=1
         │
-        ├─▶ [PlayCanvas 2.23.3 / WebGL2]  mm_floor3_clean.sog（SOG，HTTP Range 206）
+        ├─▶ [PlayCanvas 2.23.3 / WebGL2]  mm_floor3.sog（原始 LOD0 SOG，HTTP Range 206）
         │        相机实体 ── pos/quat/fov（每帧） ──────────────┐
         │                                                       ▼
         └─▶ [three.js / WebGL2 透明 overlay]            PerspectiveCamera

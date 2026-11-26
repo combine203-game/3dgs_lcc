@@ -51,10 +51,14 @@ export class Store extends EventTarget {
       if (g.order === undefined) g.order = 0;
       if (!g.color) g.color = '#22d3ee';
     }
+    /* 深度检测默认开启（2026-11-23 需求变更）。
+       旧文档里每条都显式存了 `depthTest: false`，只改 undefined 兜底不够 ——
+       用一次性迁移标记 depthDefault=2 把它们统一打开；迁移后用户手动关掉的
+       标注不会被后续加载重新打开。 */
+    const migrateDepth = d.depthDefault !== 2;
     for (const a of d.annotations) {
       if (!a.groupId) a.groupId = DEFAULT_GROUP_ID;
-      // 旧文档没有逐注记深度检测：默认关闭（始终置顶可见），不改变原有视觉
-      if (a.depthTest === undefined) a.depthTest = false;
+      if (migrateDepth || a.depthTest === undefined) a.depthTest = true;
       if (!a.style || typeof a.style !== 'object') a.style = {};
       // 与默认样式合并：仅补缺失字段，不覆盖已有值，也不重置时间戳。
       // 否则导入一个缺 style 的标注会让面板读取 a.style.color 直接崩溃（QA 组「导入无单条校验」缺口）。
@@ -64,6 +68,7 @@ export class Store extends EventTarget {
       if (a.rect === undefined) a.rect = null;
       if (a.surface === undefined) a.surface = null;
     }
+    d.depthDefault = 2;                          // 深度检测默认开的迁移标记（见上）
     return d;
   }
 
@@ -135,7 +140,11 @@ export class Store extends EventTarget {
     // 连续输入（打字 / 拖滑块）合并成一次撤销，避免撤销栈被几十条快照刷爆
     const key = opts.coalesceKey || null;
     const now = Date.now();
-    if (key && this._coalesceKey === key && now - this._coalesceAt < 1200 && this._undo.length) {
+    // noUndo：机器派生字段（如动线贴地结果 a.drape）的回写不进撤销栈 ——
+    // 用户按一次 Ctrl+Z 应该撤销「我画的那条线」，而不是撤销看不见的贴地重算。
+    if (opts.noUndo) {
+      this._coalesceKey = null;
+    } else if (key && this._coalesceKey === key && now - this._coalesceAt < 1200 && this._undo.length) {
       // 同一字段的连续编辑：把栈顶快照换回最初状态，撤销一次就回到编辑前
       this._undo[this._undo.length - 1] = this._coalesceBase;
       this._redo.length = 0;
@@ -179,6 +188,9 @@ export class Store extends EventTarget {
       [Number(p[0]) + dx, Number(p[1]), Number(p[2]) + dz]);
     if (Array.isArray(copy.surface?.points))
       copy.surface.points = copy.surface.points.map(p => [p[0] + dx, p[1], p[2] + dz]);
+    // 动线贴地中心线必须跟着平移，否则副本的箭头链还画在原位置
+    if (Array.isArray(copy.drape))
+      copy.drape = copy.drape.map(p => [p[0] + dx, p[1], p[2] + dz]);
     if (Array.isArray(copy.rect)) copy.rect = copy.rect.slice();
     copy.order = Date.now();
     copy.createdAt = new Date().toISOString();

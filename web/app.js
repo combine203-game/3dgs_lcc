@@ -4,6 +4,11 @@ import { initWalkControls } from './walk-controls.js';
 import { initCollisionDebug } from './collision-debug.js';
 import { initRouteRecorder } from './route-recorder.js';
 import { initMiniMap } from './mini-map.js';
+import { initDepthView } from './depth-view.js';
+import {
+  IS_LCC2, SOURCE_MODE, STREAM_HUD, LOG_SPACE, IS_METRIC, MASK_CHUNKS,
+  resolveLcc2Content, startStreamProbe, markLoaded, mountStreamHud
+} from './lcc2-stream.js';
 
 // 碰撞网格修复后渲染世界是米制（1 单位 = 1 m），漫游物理常量同步用米制。
 // 旧值是给 log 压缩空间标定的（眼高 ln(2.6)=0.956、重力 3.6），在米制世界
@@ -24,6 +29,36 @@ const params = new URLSearchParams(location.search);
 const videoMode = params.get('video') === '1';
 // 嵌入展览馆首页时，楼层切换由首页统一驱动，本页不再显示重复的场景按钮
 const embedMode = params.get('embed') === '1';
+/* ---------- 场景资产：默认加载原始（未清理）SOG ----------
+   mm_floor*.sog 是 splat-transform 从 XGrids .lcc2 的 LOD0 直接转出的原始资产，
+   未做任何过滤或尺度钳制。
+   早前由 sog_clean.py 生成的 *_clean.sog（删掉 15.9% 的低 alpha / 大尺度高斯）
+   不再作为默认：实测同机位对比，删除低 alpha 点会让墙面 alpha 累积不足、透出
+   深色背景而"发黑"（暗部占比 8.0% → 10.8%，高频能量 3.62 → 4.27）。
+   需要对照其它版本时用 ?content=./sog/xxx.sog 显式指定。 */
+const SCENE_ASSETS = {
+  floor1: './sog/mm_floor1.sog',
+  floor3: './sog/mm_floor3.sog'
+};
+const SCENE_INFO = {
+  floor1: '8.87M 点 · 原始未清理（LCC LOD0）',
+  floor3: '2.38M 点 · 原始未清理（LCC LOD0）'
+};
+/* ---------- 流式 LCC 数据（合并自 viewer_stream） ----------
+   同一份 XGrids 工程的另一条链路：不导出整包 SOG，而是把原始 .lcc2 八叉树
+   翻译成引擎可消费的 lod-meta.json，运行时按相机视锥 / LOD 距离按需请求
+   data/3dgs/*.sog 分块。默认仍是单文件 SOG，`?source=lcc2` 切到流式：
+     · data/3dgs/*.sog   官方 LOD 分块（**原样**，即 lcc2-sog-result/data/3dgs）
+     · lod-meta.json     引擎索引（米制 tree.bound；_log/ 是旧 log 域缺陷复现用）
+     · meta.lcc2         权威八叉树索引，运行时与之逐项校验
+   `?stream=1` 额外挂流式观测 HUD，`?budget=N` 覆盖渲染预算（百万）。
+   `?space=log` 回到旧错位坐标域做 A/B（仅诊断，不建议）。
+   `?mask=1` 才切到 <scene>_masked/ 的「超大高斯透明化」对照版 —— 默认不用，
+   那一版远景会发暗（室内机位均值 83 → 69），只是 A/B 素材。 */
+const LOD_DIR = (sc) => './sog/' + sc + (LOG_SPACE ? '_log' : (MASK_CHUNKS ? '_masked' : ''));
+const LOD_META = (sc) => LOD_DIR(sc) + '/lod-meta.json';
+// 权威索引固定在原始分块目录（与官方导出目录同名，_masked / _log 只是变体）
+const LCC2_META = (sc) => './sog/' + sc + '/meta.lcc2';
 // 两个完整 LOD0 单文件 SOG；三楼是 exe 默认场景。
 // 一楼既有室外广场 / 柱廊，也有室内接待台大厅（后者见 spawnPoints.floor1）。
 // 出生点改为全局三选一，位姿统一在 ./sog/<scene>/scene-meta.json 维护。
@@ -31,16 +66,20 @@ const embedMode = params.get('embed') === '1';
 const SCENES = {
   floor1: {
     name: '1 层',
-    detail: '8.87M 高斯 · 完整 LOD0 单文件 · 112.9 MB',
-    content: './sog/mm_floor1_clean.sog',
+    detail: '8.87M 高斯 · 完整 LOD0 单文件 · 112.9 MB · 原始未清理',
+    content: SCENE_ASSETS.floor1,
+    lcc2: LCC2_META('floor1'),
+    lodMeta: LOD_META('floor1'),
     settings: './viewer/settings-floor1.json',
     collision: './sog/floor1/collision-manifest.json',
     poster: './sog/floor1/info/thumb.jpg'
   },
   floor3: {
     name: '3 层',
-    detail: '2.38M 高斯 · 完整 LOD0 单文件 · 33.1 MB',
-    content: './sog/mm_floor3_clean.sog',
+    detail: '2.38M 高斯 · 完整 LOD0 单文件 · 33.1 MB · 原始未清理',
+    content: SCENE_ASSETS.floor3,
+    lcc2: LCC2_META('floor3'),
+    lodMeta: LOD_META('floor3'),
     settings: './viewer/settings-floor3.json',
     collision: './sog/floor3/collision-manifest.json',
     poster: './sog/floor3/info/thumb.jpg'
@@ -67,6 +106,30 @@ const cfg = SCENES[scene];
 const spawnKey = SPAWN_META[spawnParam] ? spawnParam
   : (spawnParam === 'indoor' ? 'floor1'
      : (scene === 'floor1' ? 'floor1' : 'floor3'));
+
+/* ---------- 流式渲染预算（单位：百万 splats，?budget=N 可覆盖） ----------
+   引擎默认 4M 是硬上限：低于 LOD0 全树点数时，GSplatBudgetBalancer 只能按距离
+   把预算分给近处少数节点，中远节点被钉在最粗档甚至根本不请求对应分块 ——
+   表现是「站定不动四周大片空洞，走近才慢慢冒出来」。viewer_stream 实测
+   （STREAM_TEST.md 第 13 节）：一层 4M→7/32 分块有空洞、9M 以上 18/32 分块
+   画面完整；三层 LOD0 只 2.38M，默认 4M 已够，不动它。
+   1.1 倍余量用来覆盖环境球等固定层。 */
+const SCENE_FINEST_M = { floor1: 8.862771, floor3: 2.379502 };
+const budgetParam = Number(params.get('budget'));
+const STREAM_BUDGET = Number.isFinite(budgetParam) && budgetParam > 0
+  ? Math.min(64, budgetParam)
+  : (IS_LCC2 && !LOG_SPACE && SCENE_FINEST_M[scene] > 4
+    ? Math.ceil(SCENE_FINEST_M[scene] * 1.1) : null);
+globalThis.__MG_BUDGET = IS_LCC2 ? STREAM_BUDGET : null;
+globalThis.__MG_SOURCE = SOURCE_MODE;
+
+// 观测器必须在模块顶层启动：PerformanceObserver(buffered) 才能抓到页面加载
+// 以来已经完成的分块请求，首帧时间也才是相对页面导航的绝对值。
+startStreamProbe();
+if (STREAM_HUD) mountStreamHud();
+if (IS_LCC2 && params.get('content')) {
+  console.warn('[viewer] ?content= 只在单文件 SOG 模式生效，需要时加 ?source=sog');
+}
 
 /* ---------- 嵌入模式：首页楼层导航是唯一的场景 / 机位入口 ----------
    同一场景（室外 ↔ 一层）只切换出生点，不重新加载 90+ MB 的 SOG；
@@ -120,27 +183,13 @@ window.addEventListener('message', (e) => {
   window.__mgEmbed.setSpawn(e.data.spawn);
 });
 
-// mm_floor*.sog 由 splat-transform 从同一 LCC 工程导出，包围盒与
-// lod-meta.json 的 tree.bound 逐轴对应为 m = (s.x, -s.z, s.y)。
-// 旧 lcc2 分块用 Rx(-90) 得到 world = (s.x, s.z, -s.y)；要让新数据落在
-// 同一个 world（相机 / 碰撞网格 / 出生点 / 漫游路径全部复用），需 Rx(180)：
-//   (m.x, -m.y, -m.z) = (s.x, s.z, -s.y)。
-const SPLAT_ROTATION = [180, 0, 0];
+// 两种数据源落在**同一个米制世界**（相机 / 碰撞网格 / 出生点 / 漫游路径复用），
+// 但 SOG 内部存储的轴向不同，所以旋转不能共用：
+//  · 单文件 mm_floor*.sog 由 splat-transform 导出，存储值已转过一次，需 Rx(180)；
+//  · .lcc2 分块是 XGrids 原始米制 Z-up，Rx(-90) 得 world = (x, z, -y)，
+//    与碰撞网格 world=(x,z,-y) 的轴变换一致。
+const SPLAT_ROTATION = IS_LCC2 ? [-90, 0, 0] : [180, 0, 0];
 
-/* ---------- 高斯清理：离线生成的 clean 资产与运行时开关 ----------
-   sog_clean.py 用 splat-transform 删除 scale_* > 0.15 m 或 opacity < 0.05 的
-   高斯（大面积拖影 / 雾状半透明），颜色与球谐细节原样保留。清理结果是独立
-   .sog，切换只换 contentUrl，不必在浏览器里重新过滤 800 万点。 */
-const CLEAN_ASSETS = {
-  floor1: './sog/mm_floor1_clean.sog',
-  floor3: './sog/mm_floor3_clean.sog'
-};
-const CLEAN_INFO = {
-  floor1: '8.87M → 7.46M 点（删除 15.9%）',
-  floor3: '2.38M → 2.00M 点（删除 15.8%）'
-};
-// 干净部署包只携带已清理版 SOG（原始版已裁掉）；开关隐藏，clean 参数仅兼容旧链接
-const cleanOn = true;
 const SPAWN_KEY = 'mgSpawn_';
 // 碰撞检测默认开启：碰撞网格已改为米制轴变换，与 3DGS / 出生点同处一个
 // 世界，胶囊贴地、墙体阻挡均正常。?collision=0 可切回自由飞行；碰撞数据
@@ -184,9 +233,10 @@ document.querySelectorAll('.mg-scene').forEach((btn) => {
     location.href = '?' + q.toString();
   });
 });
-$('mg-loadsub').textContent = '正在载入「' + (SPAWN_META[spawnKey]?.label || cfg.name) +
-  '」· 完整 LOD0 单文件' +
-  (cleanOn ? ' · 模糊点已清理' : ' · 原始（未清理）') + '，首次加载需稍等';
+$('mg-loadsub').textContent = '正在载入「' + (SPAWN_META[spawnKey]?.label || cfg.name) + '」· ' +
+  (IS_LCC2
+    ? '原始 .lcc2 八叉树分块流式加载（按视野 LOD 按需请求）'
+    : '完整 LOD0 单文件 · 原始未清理') + '，首次加载需稍等';
 
 /* ---------- 顶栏：全屏 / 帮助 ---------- */
 $('mg-full').addEventListener('click', () => {
@@ -197,22 +247,16 @@ const helpbox = $('mg-helpbox');
 $('mg-help').addEventListener('click', () => { helpbox.hidden = !helpbox.hidden; });
 $('mg-helpclose').addEventListener('click', () => { helpbox.hidden = true; });
 
-/* ---------- 高斯清理开关 ---------- */
-const cleanBtn = $('mg-clean');
-if (cleanBtn) {
-  cleanBtn.classList.toggle('mg-on', cleanOn);
-  cleanBtn.classList.toggle('mg-off', !cleanOn);
-  $('mg-clean-state').textContent = cleanOn ? '开' : '关';
-  cleanBtn.title = cleanOn
-    ? '当前：已清理模糊高斯（点击切回原始，快捷键 G）'
-    : '当前：原始场景（点击启用清理，快捷键 G）';
-  cleanBtn.addEventListener('click', () => {
-    const q = new URLSearchParams(params);
-    q.set('clean', cleanOn ? '0' : '1');
-    location.href = '?' + q.toString();
-  });
+/* ---------- 资产信息：默认已是原始数据，清理切换已整体移除 ----------
+   站点只携带原始 SOG（或 ?source=lcc2 的官方原始 LOD 分块），`?clean=1` 的
+   历史链接也不再能切到清理版；顶栏清理按钮与 G 键一并移除，避免留下点了
+   没反应的死控件；工具面板「清理」标签页只保留当前资产说明。 */
+const cleanInfoEl = $('mg-clean-info');
+if (cleanInfoEl) {
+  cleanInfoEl.textContent = IS_LCC2
+    ? '原始 .lcc2 分块 · ' + (SCENES[scene].detail || '')
+    : SCENE_INFO[scene];
 }
-$('mg-clean-info').textContent = CLEAN_INFO[scene];
 
 /* ---------- 出生点标定工具 ---------- */
 // createViewer 完成后赋值；面板由用户触发，取到的始终是最新相机。
@@ -492,8 +536,22 @@ function installFirstFrameGate(viewer) {
     });
   }
 
-  // 干净部署包只含已清理版 SOG，不再回退到已裁掉的原始资产。
-  const contentUrl = CLEAN_ASSETS[scene];
+  /* 数据源二选一：
+     · sog（默认）—— params.get('content') 或原始单文件 SOG；
+     · lcc2（?source=lcc2）—— 先解析原始 meta.lcc2 作权威索引并与
+       lod-meta.json 逐项校验，再把 lod-meta.json 交给引擎；引擎按
+       basename 选 GSplatOctreeParser，按视野 / LOD 距离按需请求分块 SOG。
+     tools/compare_stream_vs_sog.mjs 会把同一机位的两条链路截图 + 像素统计。 */
+  let contentUrl;
+  if (IS_LCC2) {
+    const lcc2 = await resolveLcc2Content(
+      { content: cfg.lcc2, lodMeta: cfg.lodMeta }, scene);
+    contentUrl = lcc2.contentUrl;
+    console.info('[viewer] 流式入口', cfg.lodMeta,
+      '· .lcc2 解析 ' + lcc2.parseMs + 'ms');
+  } else {
+    contentUrl = params.get('content') || SCENE_ASSETS[scene];
+  }
   // 允许用 URL 覆盖出生点，便于现场标定 / 第三方微调：
   //   ?pos=x,y,z   相机世界坐标    ?look=x,y,z   视线目标点
   const settings = Promise.all([
@@ -551,6 +609,10 @@ function installFirstFrameGate(viewer) {
     ui: !videoMode,
     renderer,
     noanim: true,
+    // 分块流式的渲染预算（百万点）；默认 undefined = 引擎默认档。
+    budget: IS_LCC2 && STREAM_BUDGET ? STREAM_BUDGET : undefined,
+    // ?fullload=1 跳过「首帧先钳制到最粗 LOD」的快速揭幕，供截图 / 画质优先场景
+    fullload: params.get('fullload') === '1',
     exposeGlobals: false
   };
   // 与官方 standalone 页面保持一致，便于 Viewer 内部调试钩子读取
@@ -560,6 +622,30 @@ function installFirstFrameGate(viewer) {
     const viewer = await createViewer({ container: stage, ...options });
     // 调试/标定句柄：可在控制台读取 app、相机与场景包围盒
     window.__viewer = viewer;
+
+    /* 流式 LOD：关掉引擎默认的人为包围盒收缩与「相机背后」距离惩罚。
+       默认 lodDistanceShrink=0.75 会按「节点半尺寸超出全树中位数」收缩 AABB，
+       而 XGrids 八叉树里存在父子包围盒完全相同 / 百米级巨型节点，收缩后相机
+       走进节点内部时距离反而变大 —— 就是「本来正常加载的块，靠近了反而被裁剪
+       不渲染」。lodBehindPenalty=1.5 会进一步放大误判。
+       STREAM_TEST.md 第 12 节同机位实测：shrink=0 后 lap_var 572.6 → 619.2。 */
+    const applyLodFix = () => {
+      if (!IS_LCC2 || !IS_METRIC) return;
+      const sg = viewer.app?.scene?.gsplat;
+      if (!sg) return;
+      sg.lodDistanceShrink = 0;
+      sg.lodBehindPenalty = 1;
+    };
+    applyLodFix();
+    // reveal 阶段引擎还会再 applySettings() 一次，兜底重设并给观测器打点
+    const streamT0 = Date.now();
+    const streamPoll = setInterval(() => {
+      if (viewer.state?.loaded) {
+        applyLodFix(); markLoaded(); clearInterval(streamPoll);
+      } else if (Date.now() - streamT0 > 60000) clearInterval(streamPoll);
+    }, 200);
+    setTimeout(applyLodFix, 3500);
+
     activeViewer = viewer;
     embedViewer = viewer;
     if (window.__mgEmbed.paused) {
@@ -592,6 +678,11 @@ function installFirstFrameGate(viewer) {
     // 漫游视频模式也挂载小地图，让导出的视频自带实时三维导航小地图。
     initMiniMap({ scene, getPose: currentPose,
       label: SPAWN_META[spawnKey]?.label || cfg.name });
+    // 实时深度图：两个独立视口，默认都关闭，可同时开并排对比 ——
+    //   · 3DGS（N / 顶栏「深度」）：引擎 Picker 的 RGBA16F 深度视图（与贴花同源）；
+    //   · 碰撞 Mesh（顶栏「Mesh深度」）：主相机视角把碰撞三角网格的线性深度写进
+    //     离屏颜色目标，用来核对碰撞体与 splat 表面是否贴合。
+    initDepthView({ getViewer: () => activeViewer });
 
     if (videoMode) {
       window.__mgMiniMap?.setFollow(false);   // 显示整层 + 相机标记，而非跟随放大
@@ -608,6 +699,25 @@ function installFirstFrameGate(viewer) {
     mapBtn?.addEventListener('click', () => {
       window.__mgMiniMap?.toggle();
       syncMapBtn();
+    });
+
+    /* 顶栏「深度」按钮：实时深度图独立视口（只用 Picker 深度视图 + GPU 采样，
+       画布上单独一块矩形，不改主画面）。状态文本由 depth-view.js 自己同步。 */
+    const depthBtn = document.getElementById('mg-depth');
+    depthBtn?.addEventListener('click', () => {
+      window.__mgDepth?.toggle();
+      depthBtn.classList.toggle('mg-on', !!window.__mgDepth?.isOpen);
+    });
+
+    /* 顶栏「Mesh深度」按钮：碰撞网格深度视口。打开时若 3DGS 视口没开就顺手一起
+       打开 —— 这个视口存在的意义就是并排对比，单开一个没参考。 */
+    const meshBtn = document.getElementById('mg-mesh');
+    meshBtn?.addEventListener('click', () => {
+      const api = window.__mgMeshDepth;
+      if (!api) return;
+      const on = api.toggle();
+      if (on && !window.__mgDepth?.isOpen) window.__mgDepth?.open();
+      meshBtn.classList.toggle('mg-on', !!api.isOpen);
     });
 
     // ---- 逐帧漫游视频模式：加载可达性路径，按帧设定相机 ----
@@ -687,6 +797,9 @@ function installFirstFrameGate(viewer) {
         // 用户主动关掉碰撞后不要再把相机切回 walk（此时 walkAllowed 也已置 false，
         // 这里再加一道显式判断，避免异步时序竞态把开关“弹回去”）。
         if (window.__mgControls?.collisionUserOff) { clearInterval(walkPoll); return; }
+        // 排版 / 绘制标注时需要自由飞行（贴墙画贴花、升到高处俯视布点），
+        // walk 的「离地 1.6m 胶囊」姿态很碍事：编辑器一开就停止自动切 walk。
+        if (window.__mgEditor || globalThis.__mgEditorFly) { clearInterval(walkPoll); return; }
         const st = viewer.state;
         if (st?.loaded && st?.hasCollision && st?.walkAllowed) {
           clearInterval(walkPoll);
@@ -698,7 +811,7 @@ function installFirstFrameGate(viewer) {
 
     // 键盘快捷键（Viewer 未暴露这些接口时静默忽略）
     // 注意：编辑器打开时（.mg-editor-on）整套宿主快捷键必须让位，
-    // 否则在右侧「说明」框里敲 g / b / m 会误触发清理场景、切小地图。
+    // 否则在右侧「说明」框里敲 b / m 会误触发碰撞线框、切小地图。
     document.addEventListener('keydown', (e) => {
       if (document.documentElement.classList.contains('mg-editor-on')) return;
       const tag = e.target?.tagName || '';
@@ -710,8 +823,6 @@ function installFirstFrameGate(viewer) {
       }[e.key];
       if (spawnHotkey) {
         document.querySelector('.mg-scene[data-spawn="' + spawnHotkey + '"]')?.click();
-      } else if (e.key === 'g' || e.key === 'G') {
-        cleanBtn?.click();
       } else if (e.key === 'b' || e.key === 'B') {
         window.__mgCollisionDebug?.setBoxes(
           !window.__mgCollisionDebug.getState().boxes);
@@ -725,6 +836,10 @@ function installFirstFrameGate(viewer) {
       } else if (e.key === 'm' || e.key === 'M') {
         window.__mgMiniMap?.toggle();
         syncMapBtn();
+      // ★ 深度视口用 N，不能用 D：D 是 WASD 的「右移」，漫游时按 D 会把视口开关掉
+      } else if (e.key === 'n' || e.key === 'N') {
+        window.__mgDepth?.toggle();
+        depthBtn?.classList.toggle('mg-on', !!window.__mgDepth?.isOpen);
       } else if (e.key === 'f' || e.key === 'F') {
         viewer?.frameScene?.();
       } else if (e.key === 'r' || e.key === 'R') {

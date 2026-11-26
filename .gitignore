@@ -90,11 +90,15 @@ runtime/
 web/human/model/*.onnx
 web/human/model/weights.q8.*
 
-# ---- 5. 大二进制资产：SOG 高斯点云（约 120MB）----
+# ---- 5. 大二进制资产：SOG 高斯点云（整包约 146MB / 流式分块约 723MB）----
 # SOG 是 ZIP 式容器，浏览器需按字节范围读取，故必须本地存在。
+# 流式分块 = <scene>_masked/data/3dgs/*.sog（默认）+ <scene>/data/3dgs/*.sog
+# （?mask=0 未遮罩版）；索引 meta.lcc2 / lod-meta.json 只有几十 KB，照常跟踪。
 web/sog/*.sog
 web/sog/floor1/data/
 web/sog/floor3/data/
+web/sog/*_masked/
+web/sog/*_log/
 
 # ---- 6. 大二进制资产：测试视频（94MB）----
 web/media/*.mp4

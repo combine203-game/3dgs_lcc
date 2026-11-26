@@ -473,7 +473,13 @@ export const DECAL_SHADOW_FRAGMENT_GLSL = /* glsl */ `
     uniform float uProjNear;          // 透视近平面距离（沿光轴，米）
     uniform float nearClip;
     uniform float farClip;
-    uniform mat4  uProjVP;
+    // ★ 声明文本必须与 DECAL_SHADOW_VERTEX_GLSL 里那一行**逐字符一致**（单空格）。
+    //   PlayCanvas WebGL2 的 WebglShaderProcessorGLSL 会把 VS/FS 的 uniform 行
+    //   并集按「整行字符串」去重后重新声明到两个阶段；此前这里是双空格的 mat4 声明
+    //   而顶点侧是单空格 → 去重失败 → 生成两份 uniform mat4 uProjVP 声明
+    //   → 编译报 uProjVP redefinition → 整块贴花在 WebGL2 后端完全不投射
+    //   （WebGPU/WGSL 路径不受影响，所以只在 WebGL2 上表现为「什么都没画」）。
+    uniform mat4 uProjVP;
     varying vec4 vProj;
 
     float channelMedian(vec4 t) {

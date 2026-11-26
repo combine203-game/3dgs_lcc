@@ -87939,6 +87939,18 @@ class Picker {
         this.pickSurface = (x, y) => queue.run(() => pickSurface(x, y), null);
         this.pickVisibility = (points, radius) => queue.run(() => pickVisibility(points, radius), points.map(() => null));
         this.renderView = () => (prepareSample(0, 0) ? { texture: pickBuffer, renders } : null);
+        /* 供标注编辑器使用：一次快照 + 一次块回读（与 FrameDepthPicker 同签名）。
+           贴面矩形的整块深度反算、辅助线（OBB / 视锥体棱 / 旋转环）的逐段深度判断，
+           都靠这对方法把「每点一次同步 GPU 回读」压成「整块一次回读」。
+           queue 一并暴露：编辑器需要把「快照 + 回读」整段塞进引擎的互斥队列，
+           否则会和引擎自己的 pick 交叉提交，readback 拿到别的帧的深度。 */
+        this.queue = queue;
+        this.prepare = async () => {
+            const sample = prepareSample(0, 0);
+            return sample ? { width: sample.width, height: sample.height } : null;
+        };
+        this.readAround = (screenX, screenY, margin, width, height) =>
+            readAround(screenX, screenY, margin, width, height);
         // The scene can change under a still camera, which the camera-based cache cannot see:
         // finer detail streams in after the reveal and after every move. The engine reports each
         // frame whether all the detail it wants is resident, so the cached render is stale on
@@ -109595,6 +109607,15 @@ class Viewer {
                 pickSurface: (x, y) => activePicker().pickSurface(x, y),
                 pickVisibility: (points, radius) => activePicker().pickVisibility(points, radius),
                 renderView: () => activePicker().renderView(),
+                /* 标注编辑器专用：「一次快照 + 一次块回读」。
+                   贴面矩形的整块深度反算、辅助线（OBB / 视锥体棱 / 旋转环）的逐段深度
+                   判断都依赖这对方法 —— 这是把「每点一次同步 GPU 回读」压成「整块 1 次」
+                   的唯一入口。两个 picker 实现都有同签名的 prepare / readAround。 */
+                prepare: () => activePicker().prepare(),
+                readAround: (sx, sy, margin, width, height) =>
+                    activePicker().readAround(sx, sy, margin, width, height),
+                // 让编辑器能把「快照 + 回读」整段塞进引擎的互斥队列，避免与引擎自己的 pick 交叉
+                get queue() { return activePicker().queue; },
                 release: () => {
                     enginePicker?.release();
                     framePicker?.release();

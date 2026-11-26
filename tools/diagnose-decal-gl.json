@@ -1,0 +1,298 @@
+{
+  "gpuAdapter": "adapter-null",
+  "baseMean": 92.81,
+  "editorMean": 92.8,
+  "worst": 90.98,
+  "blank": false,
+  "collapse": false,
+  "drift": 0.14256465517241385,
+  "decalDebug": null,
+  "pageGpuErr": 0,
+  "gpuErrTotal": 0,
+  "pickReadyOk": false,
+  "visAvg": 96.83249999999998,
+  "hiddenMean": 112.75,
+  "projDelta": 15.917500000000018,
+  "projOk": true,
+  "demoOk": true,
+  "rebuild": null,
+  "guardOk": true,
+  "persp": null,
+  "perspOn": null,
+  "perspOff": null,
+  "perspDelta": null,
+  "perspOk": false,
+  "shaderErrors": [],
+  "errors": [
+    "SyntaxError: Unexpected identifier 'mat4'",
+    "[editor-bridge] 挂载失败 SyntaxError: Unexpected identifier 'mat4'"
+  ],
+  "warns": [],
+  "fail": true,
+  "rows": [
+    {
+      "label": "browse-0",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "backend": "webgl2",
+        "gpuApi": true,
+        "decals": null,
+        "decalMgr": null,
+        "editorOn": false,
+        "tool": null,
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 98280,
+        "mean": 92.82,
+        "sd": 45.93,
+        "nearBlack": 0.0115,
+        "blank": false
+      }
+    },
+    {
+      "label": "browse-1",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "backend": "webgl2",
+        "gpuApi": true,
+        "decals": null,
+        "decalMgr": null,
+        "editorOn": false,
+        "tool": null,
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 98280,
+        "mean": 92.8,
+        "sd": 45.94,
+        "nearBlack": 0.0115,
+        "blank": false
+      }
+    },
+    {
+      "label": "editor",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "backend": "webgl2",
+        "gpuApi": true,
+        "decals": null,
+        "decalMgr": null,
+        "editorOn": false,
+        "tool": null,
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 98280,
+        "mean": 92.8,
+        "sd": 45.94,
+        "nearBlack": 0.0115,
+        "blank": false
+      }
+    },
+    {
+      "label": "decal-0",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "backend": "webgl2",
+        "gpuApi": true,
+        "decals": null,
+        "decalMgr": null,
+        "editorOn": false,
+        "tool": null,
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 98280,
+        "mean": 90.98,
+        "sd": 48.16,
+        "nearBlack": 0.0129,
+        "blank": false
+      }
+    },
+    {
+      "label": "decal-1500",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "backend": "webgl2",
+        "gpuApi": true,
+        "decals": null,
+        "decalMgr": null,
+        "editorOn": false,
+        "tool": null,
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 98280,
+        "mean": 92.1,
+        "sd": 49.56,
+        "nearBlack": 0.0141,
+        "blank": false
+      }
+    },
+    {
+      "label": "decal-3500",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "backend": "webgl2",
+        "gpuApi": true,
+        "decals": null,
+        "decalMgr": null,
+        "editorOn": false,
+        "tool": null,
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 98280,
+        "mean": 98.22,
+        "sd": 50.88,
+        "nearBlack": 0.0161,
+        "blank": false
+      }
+    },
+    {
+      "label": "decal-6000",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "backend": "webgl2",
+        "gpuApi": true,
+        "decals": null,
+        "decalMgr": null,
+        "editorOn": false,
+        "tool": null,
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 98280,
+        "mean": 106.03,
+        "sd": 53.65,
+        "nearBlack": 0.0215,
+        "blank": false
+      }
+    },
+    {
+      "label": "decals-hidden",
+      "probe": {
+        "rect": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "abs": [
+          0,
+          0,
+          1258,
+          702
+        ],
+        "backend": "webgl2",
+        "gpuApi": true,
+        "decals": null,
+        "decalMgr": null,
+        "editorOn": false,
+        "tool": null,
+        "gsplats": 7462017,
+        "autoRender": false,
+        "loading": "mg-hide"
+      },
+      "px": {
+        "n": 98280,
+        "mean": 112.75,
+        "sd": 55.72,
+        "nearBlack": 0.0215,
+        "blank": false
+      }
+    }
+  ]
+}

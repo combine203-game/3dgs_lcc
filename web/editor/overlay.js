@@ -20,16 +20,42 @@
 import { distance, pathLength, polygonArea, arrowChainWorld,
   BOARD_BASE_PX, screenCorners, homographyMatrix3d,
   projectorOBBCorners, projectorVolumeCorners, makeFrustumProjector,
-  retuneFrustumProjector, rotateByQuat } from './schema.js';
+  retuneFrustumProjector, rotateByQuat,
+  quatMul, quatFromAxis, quatNormalize } from './schema.js';
 
 const NS = 'http://www.w3.org/2000/svg';
-/** 展板悬浮于锚点上方的导引线长度（屏幕 px） */
-const BOARD_GAP = 14;
+/** 展板悬浮于锚点上方的导引线长度（**世界米**）：随深度等比换算成像素。
+ *  旧实现是固定 14px，于是远处的展板看起来「贴着」锚点、近处却悬空很远，
+ *  与「展板深度要和锚点对齐」的要求相悖。 */
+const BOARD_GAP_WORLD = 0.12;
+/** 展板内部排版的设计像素宽度：实际显示尺寸由锚点深度换算，
+ *  内部用 --s = 显示宽/设计宽 等比缩放，排版不会因缩放而挤爆。 */
+const BOARD_LAYOUT_PX = 320;
+
+/** 「像素/米」测量结果是否可信（近裁剪面附近 1m 投影会飞出屏幕，数值不可用） */
+function pxPerMeterOk(a, b) {
+  if (!a || !b) return false;
+  if (!Number.isFinite(a.x) || !Number.isFinite(a.y)) return false;
+  const d = Math.hypot(a.x - b.x, a.y - b.y);
+  return d > 0.5 && d < 4000;
+}
 /** 三维实体屏的源纹理分辨率（CSS px）：matrix3d 把它映射到投影四边形 */
 const SCREEN_TEX_W = 480;
 /** 拖动启动阈值（屏幕 px）：小于它一律视为「单击」，绝不改写任何世界坐标。
  *  与 editor.js 的 TAP_PX=5 对齐并略放宽，容纳真实鼠标点击时的手部微抖。 */
 const DRAG_PX = 6;
+
+/* 三维小工具（旋转环的平面基 / 方位角要用到，只在本文件内使用） */
+const cross3 = (a, b) => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0]
+];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const unit3 = (a) => {
+  const l = Math.hypot(a[0], a[1], a[2]) || 1;
+  return [a[0] / l, a[1] / l, a[2] / l];
+};
 
 function svg(tag, attrs = {}) {
   const n = document.createElementNS(NS, tag);
@@ -53,8 +79,10 @@ function setText(node, txt) {
 
 export class Overlay {
   constructor({ host, getViewer, store, getScene, getSelected, getSelectedSet, onPick, isPreview, alwaysVisible,
-    onBoardMove, onBoardResize, onBoardAnchor, onScreenMove, isEditable, isLocked,
-    drapeLine, drapeQuad, isOccluded, drapeVersion, showDecalGuides }) {
+    onBoardMove, onBoardResize, onBoardAnchor, onScreenMove, onScreenRotate,
+    isEditable, isLocked,
+    drapeLine, drapeQuad, isOccluded, drapeVersion, showDecalGuides,
+    probeOcclusion }) {
     this.host = host;
     this.getViewer = getViewer;
     this.store = store;
@@ -72,6 +100,8 @@ export class Overlay {
     // 三维实体屏六向移动：overlay 按相机基向量把屏幕位移换算成世界位移，
     // 编辑器只负责把「起点 + 位移」写回 points[0]。
     this.onScreenMove = onScreenMove || null;
+    // 三维实体屏「底心旋转锚点」拖拽：只改 style.yaw / pitch（位置不变）
+    this.onScreenRotate = onScreenRotate || null;
     this.isEditable = isEditable || (() => !this.isPreview());
     // 选中一个对象后其余标注锁定：变暗 + 不可拾取 / 拖拽 / 编辑
     this.isLocked = isLocked || (() => false);
@@ -86,6 +116,10 @@ export class Overlay {
        编辑态必须画（要拖拽、要看清体积）；浏览态只显示 GPU 投射的视频，
        线框属于编辑辅助，必须隐藏 —— 否则观众会在画面上看到一圈「铁丝网」。 */
     this.showDecalGuides = showDecalGuides || (() => true);
+    /* 辅助线「场景深度判断」：把 OBB / 视锥台的棱和旋转环按深度快照逐段判定遮挡。
+       探测是异步 + 节流的（1 次 prepare + 1 次块回读），绘制永远用上一轮结果，
+       所以打开深度判断不会给每帧加任何 GPU 回读。 */
+    this.probeOcclusion = probeOcclusion || null;
 
     this.layer = div('ed-layer');
     this.svg = svg('svg', { class: 'ed-svg' });
@@ -101,15 +135,44 @@ export class Overlay {
     this._screenDrag = null;    // 三维屏六向移动拖拽状态
     this._suppressClick = false;
     this._raf = 0;
+    this._running = false;
+    this.lastError = null;      // 最近一次 frame() 异常（循环保活，供诊断读取）
+    this._errLogged = false;
     this._tmp = null;
     this._out = null;
   }
 
+  /** 启动渲染循环。
+   *  【必须先续链、再渲染】：旧实现是 `frame(); raf = requestAnimationFrame(loop)`，
+   *  只要某一帧投影/绘制抛一次异常，`requestAnimationFrame` 那一行就永远执行不到，
+   *  整条链静默死亡 —— 之后新建的标注全部不渲染（数据在、DOM 不在，看起来像
+   *  「贴花没生成」「手柄不见了」）。现在把续链提前，并吞掉单帧异常：
+   *  下一帧照常重试，同时把原因留在 lastError 里供诊断读取。 */
   start() {
-    const loop = () => { this.frame(); this._raf = requestAnimationFrame(loop); };
+    if (this._running) return;                 // 防重复启动（两次 loop 会让绘制量翻倍）
+    this._running = true;
+    const loop = () => {
+      if (!this._running) return;
+      this._raf = requestAnimationFrame(loop);
+      try {
+        this.frame();
+        this.lastError = null;
+        this._errLogged = false;
+      } catch (e) {
+        this.lastError = String((e && e.stack) || e);
+        if (!this._errLogged) {
+          this._errLogged = true;
+          console.error('[overlay] frame 异常（循环已保活，下一帧重试）', e);
+        }
+      }
+    };
     loop();
   }
-  stop() { cancelAnimationFrame(this._raf); }
+  stop() {
+    this._running = false;
+    cancelAnimationFrame(this._raf);
+    this._raf = 0;
+  }
   destroy() {
     this.stop();
     this.layer.remove();
@@ -131,6 +194,17 @@ export class Overlay {
     // 叠加层挂在 #mg-stage 上，这里换算成相对 host 的 CSS 像素，避免
     // canvas 与 stage 尺寸/偏移不一致时标注整体错位（表现为「画不进场景」）。
     return { x: out.x * sx + ox, y: out.y * sy + oy, d: Math.hypot(dx, dy, dz) };
+  }
+
+  /** 相机的世界 up（单位向量）。用来量「像素/米」：沿 up 走 1 米再投影，
+   *  屏幕位移就是该深度的真实透视比例。取不到就用世界 +Y（展板本来就是重力对齐的）。 */
+  _cameraUp(ctx) {
+    const up = ctx?.cam?.entity?.up || ctx?.cam?.up;
+    let v = up && Number.isFinite(up.x) ? [up.x, up.y, up.z] : [0, 1, 0];
+    const len = Math.hypot(v[0], v[1], v[2]);
+    if (!(len > 1e-6)) v = [0, 1, 0];
+    else v = [v[0] / len, v[1] / len, v[2] / len];
+    return v;
   }
 
   _context() {
@@ -195,8 +269,10 @@ export class Overlay {
     const n = this.nodes.get(id);
     if (n) {
       n.el?.remove(); n.g?.remove();
-      // 六向手柄挂在独立 DOM 层（不受 matrix3d 变形），必须一起清掉
+      // 六向手柄 / 底心旋转锚点挂在独立 DOM 层（不受 matrix3d 变形），必须一起清掉
       n.parts?.screen?.gizmo?.remove();
+      n.parts?.screen?.rot?.remove();
+      n.parts?.decalOBB?.g?.remove();
       this.nodes.delete(id);
     }
   }
@@ -209,6 +285,8 @@ export class Overlay {
     if (a.kind === 'line') {
       const w = this.nodes.get(a.id)?.parts?.flow?.world;
       if (Array.isArray(w) && w.length) return w;
+      // 还没跑到渲染（首帧 / 隐藏）时，用持久化的贴地中心线判定
+      if (Array.isArray(a.drape) && a.drape.length) return a.drape;
     }
     if (a.kind === 'decal' && Array.isArray(a.surface?.points) && a.surface.points.length) {
       const pts = a.surface.points, step = Math.max(1, Math.floor(pts.length / 12));
@@ -221,6 +299,21 @@ export class Overlay {
       const cy = a.points.reduce((s, p) => s + p[1], 0) / a.points.length;
       const cz = a.points.reduce((s, p) => s + p[2], 0) / a.points.length;
       return a.points.concat([[cx, cy, cz]]);
+    }
+    /* 三维实体屏 / 展板：面板面积大，只用锚点一条射线判定「是否被遮挡」太激进 ——
+       相机平移时墙角 / 柱子掠过锚点，整块面板就瞬间消失（用户反馈 3）。
+       这里取面板的四角 + 中心共 5 个世界点，只有**全部**被挡才隐藏。 */
+    if (a.kind === 'screen' && Array.isArray(a.points?.[0])) {
+      const geo = screenCorners(a.points[0], a.style?.size || { w: 2.4, h: 1.35 },
+        a.style?.yaw, a.style?.pitch);
+      return [geo.center, ...geo.corners];
+    }
+    if (a.kind === 'board' && Array.isArray(a.points?.[0])) {
+      const c = a.points[0];
+      const r = Math.max(0.4, Number(a.style?.size?.w) || 1.8) * 0.35;
+      return [c,
+        [c[0] + r, c[1], c[2]], [c[0] - r, c[1], c[2]],
+        [c[0], c[1] + r, c[2]], [c[0], c[1] - r, c[2]]];
     }
     return a.points;
   }
@@ -382,9 +475,13 @@ export class Overlay {
           shape.setAttribute('fill', 'none');
           shape.setAttribute('stroke', flowOk ? 'transparent' : c);
           shape.setAttribute('stroke-opacity', flowOk ? '0' : '0.95');
-          shape.setAttribute('stroke-width', flowOk ? '3' : Math.max(3, Number(a.style.strokeWidth) || 2));
+          /* 箭头之间有空隙、箭头凹口处也没有面：保留一条「不可见的宽描边」当命中区。
+             否则在这些缝里点击会穿透到 stage —— 绘制工具下就又多落一个点、新建出一个
+             标注（用户反馈：选中/交互对象时点击不该新建）。pointer-events:stroke 与
+             描边是否可见无关，透明也能命中。 */
+          shape.setAttribute('stroke-width', flowOk ? '18' : Math.max(3, Number(a.style.strokeWidth) || 2));
           shape.setAttribute('stroke-dasharray', 'none');
-          shape.style.pointerEvents = flowOk || locked ? 'none' : 'stroke';
+          shape.style.pointerEvents = locked ? 'none' : 'stroke';
         } else {
           shape.style.pointerEvents = locked ? 'none' : '';
           shape.setAttribute('fill', closed ? c : 'none');
@@ -466,11 +563,23 @@ export class Overlay {
     const halfW = Math.max(0.12, Math.min(2, bw * 0.45));
     const segLen = Math.max(0.8, halfW * 4.6);          // 段长 > 带宽：箭头细长、指向清晰
 
-    // 贴合缓存：drape 与相机无关，只有顶点 / 带宽 / MESH 就绪状态变化才重算
-    const sig = JSON.stringify(a.points) + '|' + bw + '|' + this.drapeVersion();
+    /* 贴地中心线优先级：
+       ① a.drape —— 编辑器算好并持久化的「深度反算贴地折线」（与贴花同源）。
+          浏览态没有任何拾取能力，靠的就是它；pointsSig 不一致说明顶点已经改过、
+          这份结果过期，必须退回原始折线等编辑器重算，绝不能继续画旧位置。
+       ② drapeLine 回调 —— 编辑器内的即时兜底（碰撞 MESH 垂直吸附）。
+       ③ 原始顶点。 */
+    const pointsSig = JSON.stringify(a.points);
+    const stored = Array.isArray(a.drape) && a.drape.length >= 2 &&
+      (!a.drapeMeta?.pointsSig || a.drapeMeta.pointsSig === pointsSig);
+    // 贴合缓存：drape 与相机无关，只有顶点 / 带宽 / 贴地结果版本变化才重算
+    const sig = stored
+      ? `stored|${a.drape.length}|${a.drapeMeta?.at || 0}|${bw}`
+      : `${pointsSig}|${bw}|${this.drapeVersion()}`;
     if (f.sig !== sig) {
       f.sig = sig;
-      f.world = this.drapeLine ? this.drapeLine(a.points) : a.points;
+      if (stored) f.world = a.drape;
+      else f.world = this.drapeLine ? this.drapeLine(a.points) : a.points;
     }
     const FLOW_LIFT = 0.03;
     const world = (f.world || a.points)
@@ -480,7 +589,10 @@ export class Overlay {
     const speed = Math.max(0.1, Math.min(4, Number(a.style.flowSpeed ?? 1.4)));
     const phase = (performance.now() / 1000 * speed * 0.5) % 1;
     const showArrow = a.style.flowArrow !== false;
-    const polys3 = arrowChainWorld(world, halfW, segLen, phase, { arrow: showArrow });
+    // 视线方向：沿墙面向上爬等「切线接近竖直」的段落，世界 up 参考会退化，
+    // 由 schema 改用「切线 × 视线」定位向，避免面片垂直于墙面变成尖刺 / 乱转
+    const viewDir = ctx.fwd ? [ctx.fwd.x, ctx.fwd.y, ctx.fwd.z] : null;
+    const polys3 = arrowChainWorld(world, halfW, segLen, phase, { arrow: showArrow, viewDir });
     // 世界面片逐顶点投影；任一顶点投影失败（近裁 / 背后）就丢弃该面片
     const polys = polys3.map(poly => {
       const pr = poly.map(p => this._project(ctx, p));
@@ -577,14 +689,28 @@ export class Overlay {
     const mt = media ? ({ image: '图片', video: '视频', webpage: '网页', text: '文字', link: '链接' })[media.type] || '媒体' : '纯文字';
     setText(b.meta, `${mt} · 三维空间内嵌展示${a.link ? ' · 含外链' : ''}`);
 
-    // 几何：锚点 p（屏幕 px），缩放 zoom，世界尺寸 size -> 屏幕像素
+    /* 几何：世界尺寸 size（米）-> 屏幕像素。
+       【深度对齐】展板的屏幕尺寸必须由**锚点所在深度**的真实透视决定，否则它看起来
+       浮在与锚点不同的深度上（旧的 clamp(0.8,1.4, 18/d) 是假透视：>22m 就不再缩小、
+       <13m 就停止放大，于是近处展板反而比锚点「远」）。
+       这里不猜 fov / 画布高度：直接把「锚点」和「锚点上方 1 米」都投影一次，差值就是
+       该深度处的「像素/米」，对 DPR、fovAxis、非对称视锥一律成立。 */
     const size = a.style.size || { w: 1.8, h: 1.35 };
-    // 下限 0.8：远处展板仍保持可读像素尺寸（内容直接在展板里展示，不能缩成小方块）
-    const zoom = Math.max(0.8, Math.min(1.4, 18 / Math.max(p.d, 1)));
-    const pw = size.w * BOARD_BASE_PX * zoom;
-    const ph = size.h * BOARD_BASE_PX * zoom;
+    const anchorW = a.points[0] || [0, 0, 0];
+    const upW = this._cameraUp(ctx);
+    const pUp = this._project(ctx, [
+      anchorW[0] + upW[0], anchorW[1] + upW[1], anchorW[2] + upW[2]
+    ]);
+    const pxPerMeter = pUp && pxPerMeterOk(pUp, p) ? Math.hypot(pUp.x - p.x, pUp.y - p.y) : 0;
+    // 兜底（相机几乎正对锚点 / 上方 1m 出画）：按距离给一个合理的估算，不让展板消失
+    const ppm = pxPerMeter > 1 ? pxPerMeter : Math.max(4, 480 / Math.max(0.6, p.d));
+    const zoom = ppm / BOARD_BASE_PX;        // 与 BOARD_BASE_PX 同一口径，拖拽换算直接复用
+    const pw = size.w * ppm;
+    const ph = size.h * ppm;
+    // 悬浮间隙也是世界量（12cm），随深度等比缩放，不再固定 14px
+    const gapPx = Math.max(3, Math.min(60, BOARD_GAP_WORLD * ppm));
     // 记录本帧屏幕几何，供拖拽换算（px 增量 -> 世界尺寸）
-    n.parts.anchorScreen = { ax: p.x, ay: p.y, zoom, gap: BOARD_GAP, pw, ph, size: { ...size } };
+    n.parts.anchorScreen = { ax: p.x, ay: p.y, zoom, gap: gapPx, pw, ph, size: { ...size } };
 
     n.el.dataset.kind = a.kind;
     this._syncClass(n.el, 'ed-board', !!sel, isPreviewFade(a, p.d, alwaysVisible), locked);
@@ -592,20 +718,24 @@ export class Overlay {
     n.el.style.top = p.y + 'px';
     n.el.style.setProperty('--c', c_of(a));
     n.el.style.setProperty('--op', String(a.style.opacity));
-    n.el.style.setProperty('--w', pw + 'px');
-    n.el.style.setProperty('--h', ph + 'px');
-    // 以锚点为底心向上悬浮 gap；导引线从展板底连到锚点。
-    // 尺寸 --w/--h 已包含 zoom，这里**不能再 scale(zoom)**：
-    // 否则双重缩放会把远处展板压成一小块，内嵌网页 / 文字根本看不见。
-    n.el.style.transform = `translate(-50%, calc(-100% - ${BOARD_GAP}px))`;
+    n.el.style.setProperty('--w', pw.toFixed(1) + 'px');
+    n.el.style.setProperty('--h', ph.toFixed(1) + 'px');
+    /* 内部内容按固定设计尺寸排版，再用 --s 等比缩放：
+       这样展板整体（含标题 / 正文 / 内嵌网页）随深度真实缩放，而排版不会因为
+       --w 变小而挤成一团（旧做法直接把 --w 压小 → 文字溢出 / 换行爆炸）。 */
+    n.el.style.setProperty('--bw', BOARD_LAYOUT_PX + 'px');
+    n.el.style.setProperty('--bh', Math.round(BOARD_LAYOUT_PX * size.h / Math.max(0.05, size.w)) + 'px');
+    n.el.style.setProperty('--s', (pw / BOARD_LAYOUT_PX).toFixed(4));
+    // 以锚点为底心向上悬浮 gapPx（世界 12cm 在该深度的像素数）；导引线从展板底连到锚点。
+    n.el.style.transform = `translate(-50%, calc(-100% - ${gapPx.toFixed(1)}px))`;
 
-    // 引线锚点：默认落在展板脚下 14px；一旦 style.leadTo 有值（拖拽锚点后），
+    // 引线锚点：默认落在展板脚下 gapPx；一旦 style.leadTo 有值（拖拽锚点后），
     // 就把导引线拉长 / 旋转到那个世界点的投影位置。
     const lt = a.style.leadTo;
     const valid = Array.isArray(lt) && lt.length >= 3 && lt.every(Number.isFinite);
     const target = valid ? (this._project(ctx, lt) || { x: p.x, y: p.y }) : { x: p.x, y: p.y };
     const dx = target.x - p.x;
-    const dy = target.y - (p.y - BOARD_GAP);
+    const dy = target.y - (p.y - gapPx);
     const len = Math.max(8, Math.hypot(dx, dy));
     const angle = Math.atan2(-dx, dy);          // 默认向下 (0,1)，顺时针旋转到目标方向
     n.el.style.setProperty('--gap', len + 'px');
@@ -672,9 +802,12 @@ export class Overlay {
     // 会返回一个超大坐标，homographyMatrix3d 据此生成畸变 / 翻转的 matrix3d，
     // 屏面被拉成巨大色块。这里在角点越过近裁时直接优雅隐藏（保留选中手柄由下方逻辑处理）。
     const nearClip = (ctx.cam?.nearClip || 0.1);
+    /* 近裁保护只隐藏「屏体本身」，选中手柄与底心旋转锚点必须继续画：
+       否则面板一旦贴近镜头越过近裁（平移屏体时非常容易发生），抓手也一起消失，
+       用户就再也拖不回来 —— 表现就是「三维展板平移时突然消失」。 */
     if (quad.some(v => !v || v.d < nearClip)) {
       n.el.style.display = 'none';
-      if (n.parts.screen.gizmo) n.parts.screen.gizmo.style.display = 'none';
+      this._drawScreenHandles(a, n, geo, size, ctx, sel, locked);
       return;
     }
     // 若相机 right 与屏面局部 right 相反（部分 mock 相机 / 反向视角），四角会
@@ -684,9 +817,9 @@ export class Overlay {
       - (quad[1].y - quad[0].y) * (quad[3].x - quad[0].x);
     const q4 = cross < 0 ? [quad[1], quad[0], quad[3], quad[2]] : quad;
     const matrix = homographyMatrix3d(q4, W, H);
-    if (!matrix) {
+    if (!matrix) {                                 // 四点单应退化：同上，只收屏体
       n.el.style.display = 'none';
-      if (n.parts.screen.gizmo) n.parts.screen.gizmo.style.display = 'none';
+      this._drawScreenHandles(a, n, geo, size, ctx, sel, locked);
       return;
     }
     n.el.style.display = '';
@@ -730,7 +863,15 @@ export class Overlay {
       if (pr?.catch) pr.catch(() => { /* 自动播放策略拒绝时静默降级 */ });
     }
 
-    // ---------- 选中态：三轴 gizmo（X/Y/Z 轴柄）+ 中心选择柄 + 屏体拖动 ----------
+    this._drawScreenHandles(a, n, geo, size, ctx, sel, locked);
+  }
+
+  /** 三维屏的交互抓手：三轴 gizmo（X/Y/Z）+ 中心柄 + 底心旋转锚点。
+   *  与「屏体能否画出来」解耦 —— 屏体贴着镜头越过近裁、四点单应退化时仍要显示，
+   *  否则面板一消失用户就再也抓不到它。 */
+  _drawScreenHandles(a, n, geo, size, ctx, sel, locked = false) {
+    const s = n.parts.screen;
+    // ---------- 三轴 gizmo（X/Y/Z 轴柄）+ 中心选择柄 + 屏体拖动 ----------
     const editable = !locked && this.isEditable() && !this.isPreview();
     s.basis = this._axisBasis(ctx, geo.center);
     if (sel && editable) {
@@ -744,6 +885,136 @@ export class Overlay {
       } else gz.style.display = 'none';
       if (!s.dragAttached) { this._attachScreenDrag(a, n); s.dragAttached = true; }
     } else if (s.gizmo) s.gizmo.style.display = 'none';
+
+    /* ---------- 底心旋转锚点 ----------
+       挂在屏体「底边中点」（世界坐标 = center - up·h/2）：屏幕立在地上，
+       这个点就是它的落脚点 / 转向轴。拖动它只改 style.yaw / pitch，
+       points[0]（屏体中心）不动 —— 位置与朝向解耦，撤销也干净。 */
+    const halfH = Math.max(0.05, Number(size.h) || 1.35) / 2;
+    const footW = [
+      geo.center[0] - geo.up[0] * halfH,
+      geo.center[1] - geo.up[1] * halfH,
+      geo.center[2] - geo.up[2] * halfH
+    ];
+    const foot = this._project(ctx, footW);
+    if (sel && editable && foot) {
+      const rot = this._ensureScreenRot(n, a);
+      rot.style.display = '';
+      rot.style.left = foot.x.toFixed(1) + 'px';
+      rot.style.top = (foot.y + 16).toFixed(1) + 'px';
+      if (!s.rotAttached) { this._attachScreenRotate(a, n); s.rotAttached = true; }
+    } else if (s.rot) s.rot.style.display = 'none';
+  }
+
+  /** 底心旋转锚点：一个带环形箭头的圆形手柄（独立 DOM 层，不被 matrix3d 压扁） */
+  _ensureScreenRot(n, a) {
+    const sc = n.parts.screen;
+    if (sc.rot) return sc.rot;
+    const g = div('ed-screen-rot');
+    g.innerHTML = `
+      <svg width="34" height="34" viewBox="0 0 34 34">
+        <circle class="ed-screen-rot-ring" cx="17" cy="17" r="11.5"></circle>
+        <path class="ed-screen-rot-arc" d="M17 8.2 A8.8 8.8 0 1 1 8.6 21.5"></path>
+        <polygon class="ed-screen-rot-head" points="17,5.6 13.6,9.6 17.9,11.4"></polygon>
+        <circle class="ed-screen-rot-hit" cx="17" cy="17" r="15"></circle>
+      </svg>`;
+    g.title = '拖动：绕底心旋转屏体（左右 = 转向 yaw，上下 = 俯仰 pitch）';
+    this.doms.appendChild(g);
+    sc.rot = g;
+    sc.rotHit = g.querySelector('.ed-screen-rot-hit');
+    return g;
+  }
+
+  /**
+   * 底心锚点拖拽 -> yaw / pitch。
+   *   · 水平拖动：绕世界 Y 轴转向（向右拖 = 屏面转向屏幕右侧）；
+   *   · 垂直拖动：绕屏面右向量俯仰（向下拖 = 屏面仰起）；
+   *   · 旋转中心是屏体中心，points[0] 不变，因此「位置」不会被旋转带跑。
+   * 每次 move 都从「按下瞬间的基线」重算，不会逐帧累积误差。
+   */
+  _attachScreenRotate(a, n) {
+    const sc = n.parts.screen;
+    const hit = sc.rotHit || sc.rot?.querySelector('.ed-screen-rot-hit');
+    if (!hit) return;
+    hit.addEventListener('pointerdown', (e) => {
+      if (e.button === 2) return;
+      const a0 = this.store.get(a.id);
+      if (!a0 || a0.locked || this.isLocked(a.id)) return;
+      if (this.isPreview() || !this.isEditable()) return;
+      if (!this.getSelectedSet().includes(a.id)) return;
+      e.stopPropagation();
+      if (e.preventDefault) e.preventDefault();
+      const baseYaw = Number(a0.style.yaw ?? 0);
+      const basePitch = Number(a0.style.pitch ?? 0);
+      const sx = e.clientX, sy = e.clientY;
+      let suppressed = false;
+      try { hit.setPointerCapture(e.pointerId); } catch { /* 合成事件无捕获也能拖 */ }
+      const move = (ev) => {
+        const dx = ev.clientX - sx, dy = ev.clientY - sy;
+        if (!suppressed) {
+          if (Math.hypot(dx, dy) <= DRAG_PX) { ev.stopPropagation(); return; }
+          suppressed = true;
+          this._suppressClick = true;           // 真拖拽：抑制随后的误触 click
+        }
+        // 0.4°/px：100px ≈ 40°，手感接近真实转台
+        let yaw = baseYaw + dx * 0.4;
+        yaw = ((yaw + 180) % 360 + 360) % 360 - 180;
+        const pitch = Math.max(-80, Math.min(80, basePitch - dy * 0.25));
+        this.onScreenRotate?.(a.id, {
+          yaw: Math.round(yaw * 10) / 10,
+          pitch: Math.round(pitch * 10) / 10
+        });
+        ev.stopPropagation();
+      };
+      this._beginDrag(move, null, e);
+    });
+  }
+
+  /**
+   * 统一的拖拽生命周期（视锥体锚点 / 屏体 gizmo / 展板引线… 全部走这里）。
+   *
+   * 只监听 pointerup 是不够的：鼠标在 iframe 外松开、系统吞掉事件、窗口失焦、
+   * 或者指针被别的文档捕获时，本页根本收不到 pointerup —— 拖拽状态会一直挂着，
+   * 之后随便动一下鼠标，视锥体还在继续调整（用户反馈：左键松开后停不下来）。
+   * 这里三重收尾：
+   *   1) pointerup / pointercancel；
+   *   2) window blur（切窗口 / 点任务栏）；
+   *   3) pointermove 里检测「左键位已经清零」——松开事件丢了也能在下一次移动时停下。
+   * @param {Function} move   pointermove 处理
+   * @param {Function} [onEnd] 收尾回调
+   * @param {PointerEvent} [downEvent] 触发这次拖拽的 pointerdown（用于判断左键是否真按下）
+   * @returns {Function} end 收尾函数（内部也会调用，重复调用安全）
+   */
+  _beginDrag(move, onEnd, downEvent) {
+    const doc = this.host?.ownerDocument || document;
+    const win = doc.defaultView || window;
+    /* 只有「按下瞬间左键确实是按下态」才启用 buttons 兜底：合成事件
+       （测试 / 自动化派发）pointerdown 的 buttons 通常是 0，拿它判断会误终止拖拽。 */
+    const armed = !!downEvent && (downEvent.buttons & 1) === 1;
+    let done = false;
+    const end = (ev) => {
+      if (done) return;
+      done = true;
+      doc.removeEventListener('pointermove', onMove);
+      doc.removeEventListener('pointerup', end);
+      doc.removeEventListener('pointercancel', end);
+      win.removeEventListener('blur', end);
+      try { onEnd?.(ev); } catch (_) { /* 收尾回调异常不影响卸载监听 */ }
+    };
+    const onMove = (ev) => {
+      /* 真实鼠标在 iframe 外松手时本页收不到 pointerup，buttons 却会变 0 ——
+         每次移动都校验一次，松手事件丢了也能立刻停下。触摸 / 笔无此语义。 */
+      if (armed && ev.pointerType !== 'touch' && (ev.buttons & 1) === 0) {
+        end(ev);
+        return;
+      }
+      move(ev);
+    };
+    doc.addEventListener('pointermove', onMove);
+    doc.addEventListener('pointerup', end);
+    doc.addEventListener('pointercancel', end);
+    win.addEventListener('blur', end);
+    return end;
   }
 
   /**
@@ -885,6 +1156,7 @@ export class Overlay {
       if (!sel.includes(a.id)) return;
       this._screenDrag = {
         id: a.id, mode, key, target,
+        armed: (e.buttons & 1) === 1,               // 左键按下态（合成事件为 0，不启用兜底）
         sx: e.clientX, sy: e.clientY, moved: false,
         start: a2.points[0].slice(0, 3),
         basis: sc.basis,
@@ -902,6 +1174,10 @@ export class Overlay {
     const move = (e) => {
       const d = this._screenDrag;
       if (!d) return;
+      if (d.armed && e.pointerType !== 'touch' && (e.buttons & 1) === 0) {
+        end(e);                                      // 左键已松开：停止平移屏体
+        return;
+      }
       if (!d.moved) {
         if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) <= DRAG_PX) { e.stopPropagation(); return; }
         d.moved = true;
@@ -1076,6 +1352,7 @@ export class Overlay {
     const o = n.parts.decalOBB;
     if (!o) return;
     if (o.g) o.g.style.display = 'none';
+    if (o.rings) o.rings.style.display = 'none';
     if (o.handles) o.handles.style.display = 'none';
   }
 
@@ -1110,16 +1387,29 @@ export class Overlay {
     if (dc.label) dc.label.style.display = 'none';
     if (dc.dom && dc.dom.video) { const p = dc.dom.video.parentElement; if (p) p.style.display = 'none'; }
 
-    if (!n.parts.decalOBB) n.parts.decalOBB = { g: null, handles: null, lines: [], hcircles: [] };
+    if (!n.parts.decalOBB) {
+      n.parts.decalOBB = { g: null, rings: null, handles: null, segs: [], ringSegs: [], ringHits: [], hcircles: [], occ: null };
+    }
     const o = n.parts.decalOBB;
-    if (!o.g) {
-      o.g = svg('g', { class: 'ed-decal-obb' });
-      n.g.appendChild(o.g);
-      o.handles = svg('g', { class: 'ed-decal-obb-handles' });
-      n.g.appendChild(o.handles);
+    if (!o.g || !o.rings) {
+      if (!o.g) {
+        o.g = svg('g', { class: 'ed-decal-obb' });
+        n.g.appendChild(o.g);
+      }
+      /* 旋转环单独一层，压在棱线之上、手柄之下：环是「转向」入口，
+         必须盖住棱线才能点得中（棱只画不接事件）。 */
+      if (!o.rings) {
+        o.rings = svg('g', { class: 'ed-decal-obb-rings' });
+        n.g.appendChild(o.rings);
+      }
+      if (!o.handles) {
+        o.handles = svg('g', { class: 'ed-decal-obb-handles' });
+        n.g.appendChild(o.handles);
+      }
       this._attachDecalDrag(a, o);
     }
     o.g.style.display = '';
+    o.rings.style.display = '';
     o.handles.style.display = selected ? '' : 'none';
 
     /* 8 个体角点（世界）-> 投影。
@@ -1134,7 +1424,10 @@ export class Overlay {
     const visible = isPersp
       ? proj.filter(p => p && p.d > 0.05).length >= 2
       : proj.every(p => p && p.d > 0.05);
-    if (!visible) { o.g.style.display = 'none'; o.handles.style.display = 'none'; return 0; }
+    if (!visible) {
+      o.g.style.display = 'none'; o.rings.style.display = 'none'; o.handles.style.display = 'none';
+      return 0;
+    }
 
     // 12 条边（索引对）
     const edges = [
@@ -1142,18 +1435,143 @@ export class Overlay {
       [4, 5], [5, 7], [7, 6], [6, 4],   // z=+
       [0, 4], [1, 5], [2, 6], [3, 7]    // 连接
     ];
-    while (o.lines.length < edges.length) {
-      const ln = svg('line', { class: 'ed-decal-obb-edge' });
-      o.g.appendChild(ln); o.lines.push(ln);
+    /* 【辅助线深度判断】每条棱按 SEG 段细分：段中点既做深度采样点，也做绘制的插值参数。
+       选中时 6 段（能看出「哪一截被墙挡住」），未选中时整条 1 段（省 DOM）。
+       屏幕空间线性插值是正确的：世界直线投影后仍是直线（透视也成立）。 */
+    const SEG = selected ? 6 : 1;
+    const nSeg = edges.length * SEG;
+    while (o.segs.length < edges.length * 6) {
+      const ln = svg('line', { class: 'ed-decal-obb-edge ed-decal-obb-seg' });
+      o.g.appendChild(ln); o.segs.push(ln);
     }
-    edges.forEach((e, i) => {
-      const A = proj[e[0]], B = proj[e[1]];
-      const ln = o.lines[i];
-      if (!A || !B) { ln.style.display = 'none'; return; }
-      ln.style.display = '';
-      ln.setAttribute('x1', A.x.toFixed(1)); ln.setAttribute('y1', A.y.toFixed(1));
-      ln.setAttribute('x2', B.x.toFixed(1)); ln.setAttribute('y2', B.y.toFixed(1));
+    for (let i = nSeg; i < o.segs.length; i++) o.segs[i].style.display = 'none';
+
+    const segPts = [];          // 段中点世界坐标（探测点，顺序与 segs 前 nSeg 项一致）
+    edges.forEach((e) => {
+      const A = corners[e[0]], B = corners[e[1]];
+      for (let s = 0; s < SEG; s++) {
+        const t = (s + 0.5) / SEG;
+        segPts.push([
+          A[0] + (B[0] - A[0]) * t,
+          A[1] + (B[1] - A[1]) * t,
+          A[2] + (B[2] - A[2]) * t
+        ]);
+      }
     });
+
+    /* ---- 旋转环几何（仅正交 OBB，且选中）：绕本地 X/Y/Z 轴转 ----
+       半径取「该环平面内最大半长 × 1.18」，三个环半径不同 → 屏幕上不重叠、不抢鼠标。
+       环同样逐段做深度判断，被墙挡住的一段走虚线暗色。 */
+    const RING_SEG = 16;
+    const ppos = a.projector.position;
+    const ringRuns = [];
+    if (selected && !isPersp) {
+      const q = a.projector.quaternion;
+      const half = a.projector.half;
+      const defs = [
+        { k: 'rx', n: [1, 0, 0], R: Math.max(half[1], half[2]) * 1.18 },
+        { k: 'ry', n: [0, 1, 0], R: Math.max(half[0], half[2]) * 1.18 },
+        { k: 'rz', n: [0, 0, 1], R: Math.max(half[0], half[1]) * 1.18 }
+      ];
+      for (const def of defs) {
+        const N = rotateByQuat(def.n, q);
+        // 环平面内的正交基：挑与法向最不平行的世界轴做参考，避免退化
+        const ref = Math.abs(N[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+        let U = [
+          ref[1] * N[2] - ref[2] * N[1],
+          ref[2] * N[0] - ref[0] * N[2],
+          ref[0] * N[1] - ref[1] * N[0]
+        ];
+        const ul = Math.hypot(U[0], U[1], U[2]) || 1;
+        U = [U[0] / ul, U[1] / ul, U[2] / ul];
+        const V = [
+          N[1] * U[2] - N[2] * U[1],
+          N[2] * U[0] - N[0] * U[2],
+          N[0] * U[1] - N[1] * U[0]
+        ];
+        const at = (t) => {
+          const c = Math.cos(t) * def.R, si = Math.sin(t) * def.R;
+          return [
+            ppos[0] + U[0] * c + V[0] * si,
+            ppos[1] + U[1] * c + V[1] * si,
+            ppos[2] + U[2] * c + V[2] * si
+          ];
+        };
+        const segs = [], mids = [], poly = [];
+        for (let s = 0; s < RING_SEG; s++) {
+          const t0 = (s / RING_SEG) * Math.PI * 2;
+          const t1 = ((s + 1) / RING_SEG) * Math.PI * 2;
+          const A = this._project(ctx, at(t0));
+          const B = this._project(ctx, at(t1));
+          segs.push(A && B && A.d > 0.05 && B.d > 0.05
+            ? { x1: A.x, y1: A.y, x2: B.x, y2: B.y } : null);
+          mids.push(at((t0 + t1) / 2));
+          poly.push(at(t0));
+        }
+        ringRuns.push({ k: def.k, segs, mids, poly });
+      }
+    }
+
+    // 一次深度探测同时覆盖「棱段中点 + 环段中点」，结果下一帧生效（异步 + 节流）
+    const probePts = segPts.concat(...ringRuns.map(r => r.mids));
+    const blocked = this._decalOcclusion(a, o, probePts);
+
+    edges.forEach((e, ei) => {
+      const A = proj[e[0]], B = proj[e[1]];
+      for (let s = 0; s < SEG; s++) {
+        const ln = o.segs[ei * SEG + s];
+        if (!A || !B) { ln.style.display = 'none'; continue; }
+        const t0 = s / SEG, t1 = (s + 1) / SEG;
+        ln.style.display = '';
+        ln.setAttribute('x1', (A.x + (B.x - A.x) * t0).toFixed(1));
+        ln.setAttribute('y1', (A.y + (B.y - A.y) * t0).toFixed(1));
+        ln.setAttribute('x2', (A.x + (B.x - A.x) * t1).toFixed(1));
+        ln.setAttribute('y2', (A.y + (B.y - A.y) * t1).toFixed(1));
+        const gi = ei * SEG + s;
+        if (blocked && blocked[gi]) ln.setAttribute('class', 'ed-decal-obb-edge ed-decal-obb-seg is-blocked');
+        else ln.setAttribute('class', 'ed-decal-obb-edge ed-decal-obb-seg');
+      }
+    });
+
+    /* 旋转环 DOM：每个轴 RING_SEG 条可见线段（逐段遮挡）+ 1 条粗透明 polyline 做命中区 */
+    while (o.ringSegs.length < 3 * RING_SEG) {
+      const ln = svg('line', { class: 'ed-decal-ring' });
+      o.rings.appendChild(ln); o.ringSegs.push(ln);
+    }
+    while (o.ringHits.length < 3) {
+      const pl = svg('polyline', { class: 'ed-decal-ring-hit' });
+      o.rings.appendChild(pl); o.ringHits.push(pl);
+    }
+    let ringIdx = 0;
+    for (let a3 = 0; a3 < 3; a3++) {
+      const run = ringRuns[a3];
+      const hit = o.ringHits[a3];
+      if (!run) {
+        hit.style.display = 'none';
+        for (let s = 0; s < RING_SEG; s++) o.ringSegs[a3 * RING_SEG + s].style.display = 'none';
+        continue;
+      }
+      hit.style.display = '';
+      hit.setAttribute('points', run.poly.map(p => {
+        const pp = this._project(ctx, p);
+        return pp ? `${pp.x.toFixed(1)},${pp.y.toFixed(1)}` : '0,0';
+      }).join(' '));
+      hit.dataset.id = a.id; hit.dataset.role = 'decal-handle'; hit.dataset.axis = run.k;
+      for (let s = 0; s < RING_SEG; s++, ringIdx++) {
+        const ln = o.ringSegs[a3 * RING_SEG + s];
+        const g2 = run.segs[s];
+        if (!g2) { ln.style.display = 'none'; continue; }
+        ln.style.display = '';
+        ln.setAttribute('x1', g2.x1.toFixed(1)); ln.setAttribute('y1', g2.y1.toFixed(1));
+        ln.setAttribute('x2', g2.x2.toFixed(1)); ln.setAttribute('y2', g2.y2.toFixed(1));
+        ln.setAttribute('data-axis', run.k);
+        // 环段遮挡索引 = 棱段总数 + 本环之前的环段数 + s
+        const gi = nSeg + (a3 * RING_SEG) + s;
+        ln.setAttribute('class', blocked && blocked[gi] ? 'ed-decal-ring is-blocked' : 'ed-decal-ring');
+      }
+    }
+    /* 环按 X/Y/Z 上色（与轴线手柄一致），棱线仍跟随选中色 currentColor */
+    o.rings.setAttribute('data-mode', isPersp ? 'persp' : 'ortho');
 
     // 中心 + 3 个轴向缩放手柄（±X/±Y/±Z 面心）
     const pos = a.projector.position;
@@ -1165,8 +1583,7 @@ export class Overlay {
     };
     /* 手柄语义：
        · ortho：中心 = 盒心平移；±X / ±Y / ±Z = 三个半尺寸。
-       · persp：中心 = 光心平移；±X / ±Y = 远平面半宽 / 半高（改视场）；
-         +Z = 远距（等比缩放远平面，保持 FOV 不变）。
+       · persp：见下（aim / move 两个独立手柄）。
          透视模式下 -Z 手柄在光心背后没有意义，直接不给。 */
     const handles = isPersp
       ? [
@@ -1184,11 +1601,30 @@ export class Overlay {
         { k: 'mz', w: [pos[0] - axisDir.z[0], pos[1] - axisDir.z[1], pos[2] - axisDir.z[2]] },
         { k: 'pz', w: [pos[0] + axisDir.z[0], pos[1] + axisDir.z[1], pos[2] + axisDir.z[2]] }
       ];
-    while (o.hcircles.length < handles.length + 1) {
+    while (o.hcircles.length < handles.length + 2) {
       const c2 = svg('circle', { class: 'ed-decal-obb-handle', r: 5 });
       o.handles.appendChild(c2); o.hcircles.push(c2);
     }
-    const allHandles = [{ k: 'move', w: pos }].concat(handles);
+    /* 「模拟相机」手柄（仅透视）：
+       · aim  —— 画在**光心**上：拖动 = 搬动模拟相机，远平面中心（目标）保持不动，
+                 于是投射方向随之改变。这就是「生成视锥体后还能调投射方向」。
+                 光心常常就贴在观察者相机上，用光心自己做拖拽基准面会退化成
+                 「屏幕怎么拖都不动」，所以基准面取远平面中心（远、稳、增益正常）。
+       · move —— 画在视锥体中段（光心 + 0.5×远距）：整块平移视锥体，用于摆位。
+       两者位置不重叠，不会互相抢鼠标。 */
+    let allHandles;
+    if (isPersp) {
+      const far = Math.max(0.3, Number(a.projector.half[2]) || 1);
+      const fwdW = rotateByQuat([0, 0, 1], a.projector.quaternion);
+      const midW = [
+        pos[0] + fwdW[0] * far * 0.5,
+        pos[1] + fwdW[1] * far * 0.5,
+        pos[2] + fwdW[2] * far * 0.5
+      ];
+      allHandles = [{ k: 'aim', w: pos }, { k: 'move', w: midW }].concat(handles);
+    } else {
+      allHandles = [{ k: 'move', w: pos }].concat(handles);
+    }
     allHandles.forEach((h, i) => {
       const ci = o.hcircles[i];
       const pp = this._project(ctx, h.w);
@@ -1208,11 +1644,52 @@ export class Overlay {
     return 0;
   }
 
+  /** 辅助线「场景深度判断」的调度器：异步 + 静止去抖，绘制永远用上一轮结果。
+   *
+   *  为什么必须去抖：探测要走 `ph.prepare()`（引擎的 pick pass，会把 3DGS 场景
+   *  再渲一遍到深度快照里），7.4M 高斯下单次是几十毫秒级。如果每帧/每 160ms
+   *  触发一次，编辑器会直接卡死。所以策略是：相机或投影机一变就重置计时器，
+   *  **稳定 300 ms 后才探一次**，探完记录 key 不重复探。
+   *  拖动过程中保留上一次结果，视觉上只是遮挡提示略滞后，交互不掉帧。 */
+  _decalOcclusion(a, o, points) {
+    const probe = this.probeOcclusion;
+    if (!probe || !Array.isArray(points) || !points.length) { o.occ = null; return null; }
+    const ctx = this._context();
+    if (!ctx) return o.occ?.blocked || null;
+    const cp = ctx.cam.entity.getPosition();
+    const fwd = ctx.cam.entity.forward;
+    const pj = a.projector || {};
+    const num = (v) => (Number.isFinite(v) ? v.toFixed(3) : 'x');
+    const key = [
+      num(cp.x), num(cp.y), num(cp.z), num(fwd.x), num(fwd.y), num(fwd.z),
+      num(pj.position?.[0]), num(pj.position?.[1]), num(pj.position?.[2]),
+      num(pj.quaternion?.[0]), num(pj.quaternion?.[1]), num(pj.quaternion?.[2]), num(pj.quaternion?.[3]),
+      num(pj.half?.[0]), num(pj.half?.[1]), num(pj.half?.[2]),
+      points.length
+    ].join('|');
+    const occ = o.occ || (o.occ = { key: '', done: '', at: 0, pending: false, blocked: null });
+    const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    if (occ.key !== key) {                       // 场景/投影机还在变：重置去抖计时
+      occ.key = key; occ.at = t;
+    } else if (!occ.pending && occ.done !== key && t - occ.at >= 300) {
+      occ.pending = true;
+      Promise.resolve()
+        .then(() => probe(points, { bias: 0.2 }))
+        .then(res => {
+          occ.pending = false;
+          occ.done = key;
+          occ.blocked = res && res.ready && Array.isArray(res.blocked) ? res.blocked : null;
+        })
+        .catch(() => { occ.pending = false; occ.done = key; });
+    }
+    return occ.blocked && occ.blocked.length === points.length ? occ.blocked : null;
+  }
+
   // 贴面矩形 OBB 手柄拖拽：中心手柄移动投影机，±X/±Y/±Z 手柄沿该轴缩放盒厚/尺寸
   _attachDecalDrag(a, o) {
     if (o._dragAttached) return;
     o._dragAttached = true;
-    o.handles.addEventListener('pointerdown', (e) => {
+    const onDown = (e) => {
       const axis = e.target.dataset?.axis;
       const id = e.target.dataset?.id;
       if (!axis || !id) return;
@@ -1221,43 +1698,104 @@ export class Overlay {
       if (this.isPreview()) return;
       e.stopPropagation();
       if (e.preventDefault) e.preventDefault();
+      const a0 = this.store.get(id);
+      if (!a0 || !a0.projector) return;
+      const pr0 = a0.projector;
+      const persp = pr0.mode === 'persp';
+      const fwd0 = rotateByQuat([0, 0, 1], pr0.quaternion);
+      const far0 = Math.max(0.3, Number(pr0.half[2]) || 1);
+      const farCenter = [
+        pr0.position[0] + fwd0[0] * far0,
+        pr0.position[1] + fwd0[1] * far0,
+        pr0.position[2] + fwd0[2] * far0
+      ];
+      /* 按下瞬间的投影机快照：位移式 / 旋转式手柄每一帧都从这份基准重算，
+         避免逐帧累积导致的漂移与抖动。 */
+      const base0 = {
+        mode: pr0.mode,
+        position: pr0.position.slice(),
+        quaternion: pr0.quaternion.slice(),
+        half: pr0.half.slice(),
+        depth: pr0.depth,
+        fov: pr0.fov, aspect: pr0.aspect, far: pr0.far, near: pr0.near
+      };
+
+      /* ---------- 旋转环（rx / ry / rz）：绕本地轴转 ----------
+         角度不用屏幕位移硬乘系数，而是把鼠标射线与**环所在平面**求交，
+         取交点相对盒心的方位角差 —— 这样「环在屏幕上被压成椭圆」时也跟手，
+         不会出现「斜着看时转得飞快 / 转不动」的问题。
+         旋转轴取按下瞬间的世界轴，增量每次都乘到同一份 base0 上，不累积误差。 */
+      if (axis[0] === 'r') {
+        const idx = axis[1] === 'x' ? 0 : axis[1] === 'y' ? 1 : 2;
+        const localAxis = idx === 0 ? [1, 0, 0] : idx === 1 ? [0, 1, 0] : [0, 0, 1];
+        const N = rotateByQuat(localAxis, pr0.quaternion);
+        const c0 = pr0.position;
+        const ref = Math.abs(N[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+        const U = unit3(cross3(ref, N));
+        const V = cross3(N, U);
+        const hit0 = this._decalDragWorld(e.clientX, e.clientY, cam, c0, N);
+        if (!hit0) return;
+        const rel0 = [hit0.x - c0[0], hit0.y - c0[1], hit0.z - c0[2]];
+        if (Math.hypot(rel0[0], rel0[1], rel0[2]) < 1e-3) return;   // 正好点在轴心：方向无定义
+        const ang0 = Math.atan2(dot3(rel0, V), dot3(rel0, U));
+        let suppressedR = false;
+        const moveR = (ev) => {
+          const hit = this._decalDragWorld(ev.clientX, ev.clientY, cam, c0, N);
+          if (!hit) return;
+          suppressedR = true;
+          const rel = [hit.x - c0[0], hit.y - c0[1], hit.z - c0[2]];
+          let d = Math.atan2(dot3(rel, V), dot3(rel, U)) - ang0;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          this._applyDecalRotate(id, N, d, base0);
+        };
+        this._beginDrag(moveR, () => { if (suppressedR) this._suppressClick = true; });
+        return;
+      }
+
+      /* 拖拽基准面 —— 决定「拖动的增益」，必须离相机足够远：
+         · aim  ：远平面中心（光心贴着观察者相机时，用光心做基准面会退化成
+                  「屏幕怎么拖都不动」，这是「模拟相机位置拖不动」的真正原因）；
+         · move ：视锥体中段 / OBB 盒心；
+         · 轴向 ：手柄自己所在的面（远平面边缘 / 半尺寸处）。 */
+      const sgn = axis[0] === 'p' ? 1 : -1;
+      let p0;
+      if (persp && axis === 'aim') {
+        p0 = farCenter;
+      } else if (persp) {
+        const local = axis === 'move' ? [0, 0, far0 * 0.5]
+          : axis[1] === 'x' ? [sgn * pr0.half[0], 0, 0]
+            : axis[1] === 'y' ? [0, sgn * pr0.half[1], 0]
+              : [0, 0, sgn * pr0.half[2]];
+        const r = rotateByQuat(local, pr0.quaternion);
+        p0 = [pr0.position[0] + r[0], pr0.position[1] + r[1], pr0.position[2] + r[2]];
+      } else {
+        p0 = pr0.position;
+      }
+      const w0 = this._decalDragWorld(e.clientX, e.clientY, cam, p0);
+      if (!w0) return;
       let suppressed = false;
       const move = (ev) => {
-        const a2 = this.store.get(id);
-        if (!a2 || !a2.projector) return;
-        /* 拖拽基准面：中心手柄用光心/盒心；轴向手柄用「手柄自己所在的位置」。
-           透视视锥体的光心常常就贴着相机，用光心做基准面时 +Z 轴的投影几乎退化
-           （面与视线垂直 → 拖多远都算不出新的远距），用远平面中心做基准才正常。 */
-        let p0 = a2.projector.position;
-        if (a2.projector.mode === 'persp' && axis !== 'move') {
-          const pr = a2.projector;
-          const sgn = axis[0] === 'p' ? 1 : -1;
-          const ax = axis[1];
-          const local = ax === 'x' ? [sgn * pr.half[0], 0, 0]
-            : ax === 'y' ? [0, sgn * pr.half[1], 0]
-              : [0, 0, sgn * pr.half[2]];
-          const r = rotateByQuat(local, pr.quaternion);
-          p0 = [pr.position[0] + r[0], pr.position[1] + r[1], pr.position[2] + r[2]];
-        }
         const w = this._decalDragWorld(ev.clientX, ev.clientY, cam, p0);
         if (!w) return;
         suppressed = true;
-        this._applyDecalDrag(id, axis, w);
+        const d = [w.x - w0.x, w.y - w0.y, w.z - w0.z];
+        // 位移式手柄（aim / move）：每帧都从「按下时」的基准算，不累积误差
+        if (axis === 'aim') this._applyDecalAim(id, base0, d, farCenter);
+        else if (axis === 'move') this._applyDecalMove(id, base0, d);
+        else this._applyDecalDrag(id, axis, w);
       };
-      const up = () => {
-        document.removeEventListener('pointermove', move);
-        document.removeEventListener('pointerup', up);
-        document.removeEventListener('pointercancel', up);
-        if (suppressed) this._suppressClick = true;
-      };
-      document.addEventListener('pointermove', move);
-      document.addEventListener('pointerup', up);
-      document.addEventListener('pointercancel', up);
-    });
+      // 统一拖拽生命周期：左键一松开就立刻停止调整（含在 iframe 外松开）
+      this._beginDrag(move, () => { if (suppressed) this._suppressClick = true; });
+    };
+    /* 手柄层（圆点）与旋转环层都要接收按下：两者位置不重叠，
+       但环是「转向」入口，必须能盖住棱线被点中。 */
+    o.handles.addEventListener('pointerdown', onDown);
+    o.rings.addEventListener('pointerdown', onDown);
   }
 
-  // 屏幕光标 -> 过 P0、法向为相机朝向的平面上的世界点（用于投影机拖拽）
-  _decalDragWorld(clientX, clientY, cam, P0) {
+  // 屏幕光标 -> 过 P0、法向为 N0（缺省 = 相机朝向）的平面上的世界点（投影机拖拽 / 旋转环共用）
+  _decalDragWorld(clientX, clientY, cam, P0, N0) {
     const v = this.getViewer();
     const canvas = v?.app?.graphicsDevice?.canvas;
     if (!canvas) return null;
@@ -1267,12 +1805,64 @@ export class Overlay {
     const p1 = camPos.clone();
     cam.screenToWorld(rx, ry, 1, p1);                 // 光线上距相机 1m 的点
     const dir = { x: p1.x - camPos.x, y: p1.y - camPos.y, z: p1.z - camPos.z };
-    const fwd = cam.entity.forward;                   // 相机朝向 = 平面法向
-    const N = { x: fwd.x, y: fwd.y, z: fwd.z };
+    const fwd = cam.entity.forward;
+    /* 默认法向取相机朝向（屏幕平行面，增益稳定）；旋转环传自己的环平面法向，
+       否则「射线 ∩ 屏幕平行面」与环平面不一致，方位角就会算错。 */
+    const N = Array.isArray(N0)
+      ? { x: N0[0], y: N0[1], z: N0[2] }
+      : { x: fwd.x, y: fwd.y, z: fwd.z };
     const denom = dir.x * N.x + dir.y * N.y + dir.z * N.z;
     if (Math.abs(denom) < 1e-6) return null;
     const t = ((P0[0] - camPos.x) * N.x + (P0[1] - camPos.y) * N.y + (P0[2] - camPos.z) * N.z) / denom;
     return { x: camPos.x + dir.x * t, y: camPos.y + dir.y * t, z: camPos.z + dir.z * t };
+  }
+
+  /** 整块平移投影机（OBB 盒心 / 视锥体中段手柄）：位移直接叠加到基准位置。
+   *  透视模式的位姿（quaternion / fov / far）完全不变，投射方向也不变。 */
+  _applyDecalMove(id, base, d) {
+    if (!base) return;
+    const pos = [base.position[0] + d[0], base.position[1] + d[1], base.position[2] + d[2]]
+      .map(v => Math.round(v * 1000) / 1000);
+    this.store.update(id, { projector: { ...base, position: pos, mode: base.mode || 'ortho' } },
+      { coalesceKey: 'decal-move:' + id });
+  }
+
+  /** 旋转环拖拽：绕**世界轴** worldAxis 转 angle（弧度），位置与尺寸都不变。
+   *  这是正交 OBB「改朝向」的唯一入口 —— 以前 ortho 模式的朝向锁死在生成时，
+   *  用户只能删了重建。增量每次乘到按下瞬间的 base0 上，所以来回拖不会累积漂移。 */
+  _applyDecalRotate(id, worldAxis, angle, base) {
+    if (!base || !Number.isFinite(angle)) return;
+    const q = quatNormalize(quatMul(quatFromAxis(worldAxis, angle), base.quaternion));
+    this.store.update(id, { projector: { ...base, quaternion: q, mode: base.mode || 'ortho' } },
+      { coalesceKey: 'decal-rot:' + id });
+  }
+
+  /**
+   * 拖动「模拟相机」（光心）→ 目标点（远平面中心）保持不动，投射方向随之改变。
+   *
+   * 这正是需求「视锥体生成后可以拖动模拟相机位置来调整投射方向」的实现：
+   *   · 目标固定 → 拖动光心等价于绕目标旋转/偏移投射方向，画面仍然投在同一块墙上；
+   *   · fov / aspect / far 全部沿用，只有 position + quaternion（朝向）变化；
+   *   · points[0] 就是光心锚点，同步写回，保证「双击飞入 / 列表定位」仍然一致。
+   */
+  _applyDecalAim(id, base, d, farCenter) {
+    if (!base) return;
+    const eye = [
+      base.position[0] + d[0],
+      base.position[1] + d[1],
+      base.position[2] + d[2]
+    ];
+    const next = makeFrustumProjector(eye, farCenter, {
+      fov: base.fov, aspect: base.aspect, far: base.far, near: base.near
+    });
+    if (!next) return;
+    const a = this.store.get(id);
+    if (!a) return;
+    const pts = a.points.map(p => p.slice());
+    if (pts[0]) {
+      pts[0] = eye.map(v => Math.round(v * 1000) / 1000);
+    }
+    this.store.update(id, { projector: next, points: pts }, { coalesceKey: 'decal-aim:' + id });
   }
 
   _applyDecalDrag(id, axis, world) {
@@ -1351,6 +1941,8 @@ export class Overlay {
         id: a.id,
         mode: corner || 'move',
         corner,
+        // 按下瞬间左键确实按着，才启用「buttons 变 0 即收尾」的兜底（合成事件 buttons=0）
+        armed: (e.buttons & 1) === 1,
         sx: e.clientX, sy: e.clientY, moved: false,
         as, anchorClient,
         initSize: a2.style.size ? { ...a2.style.size } : { w: 1.8, h: 1.35 },
@@ -1366,6 +1958,12 @@ export class Overlay {
     const move = (e) => {
       const d = this._drag;
       if (!d) return;
+      // 左键已松开却没收到 pointerup（在 iframe 外松手 / 系统吞事件）：立刻收尾，
+      // 否则拖拽状态一直挂着，之后动一下鼠标展板还在跟着跑
+      if (d.armed && e.pointerType !== 'touch' && (e.buttons & 1) === 0) {
+        end(e);                                      // 左键已松开：停止平移 / 缩放展板
+        return;
+      }
       if (!d.moved) {
         if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) <= DRAG_PX) { e.stopPropagation(); return; }
         d.moved = true;
@@ -1436,6 +2034,7 @@ export class Overlay {
       if (e.button === 2) return;
       this._anchorDrag = {
         id: a.id, pointerId: e.pointerId,
+        armed: (e.buttons & 1) === 1,               // 左键按下态（合成事件为 0）
         sx: e.clientX, sy: e.clientY, moved: false,
       };
       this._suppressClick = true;
@@ -1447,6 +2046,10 @@ export class Overlay {
     const move = (e) => {
       const d = this._anchorDrag;
       if (!d) return;
+      if (d.armed && e.pointerType !== 'touch' && (e.buttons & 1) === 0) {
+        end(e);                                      // 左键已松开：停止调整引线锚点
+        return;
+      }
       // 同样加阈值：单纯点击锚点不能写入 leadTo（否则导引线也会「变位置」）
       if (!d.moved) {
         if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) <= DRAG_PX) { e.stopPropagation(); return; }
@@ -1518,7 +2121,10 @@ export class Overlay {
         : base;
       const halfW = Math.max(0.12, Math.min(2, 0.7 * 0.45));
       const polysW = arrowChainWorld(worldPrev, halfW, Math.max(0.8, halfW * 4.6),
-        (performance.now() / 1000 * 0.7) % 1, { arrow: true });
+        (performance.now() / 1000 * 0.7) % 1, {
+          arrow: true,
+          viewDir: ctx.fwd ? [ctx.fwd.x, ctx.fwd.y, ctx.fwd.z] : null
+        });
       polys = polysW.map(poly => {
         const pr = poly.map(p => this._project(ctx, p));
         return pr.every(Boolean) ? pr.map(p => [p.x, p.y]) : null;

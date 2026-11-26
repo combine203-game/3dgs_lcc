@@ -128,6 +128,29 @@ function toggleCheck(id) {
   el.dispatchEvent(new w.Event('change', { bubbles: true }));
   toast('已切换：' + id);
 }
+/* 实时深度图：展厅页是全屏 iframe（.mg-bare 隐藏了 Viewer 顶栏），
+   所以「深度」按钮必须在这里给一个入口 —— 直接调 iframe 里的 __mgDepth。 */
+function toggleDepth() {
+  const w = win();
+  const api = w && w.__mgDepth;
+  if (!api) { toast('三维场景尚未就绪，请稍候再试'); return; }
+  if (api.supported === false) { toast('当前设备 / 后端不支持深度图'); return; }
+  const on = api.toggle();
+  toast(on ? '深度图：开（独立视口，可拖标题栏移动 / 右下角缩放）' : '深度图：关');
+  syncStatus();
+}
+/* 碰撞 Mesh 深度视口：与 3DGS 深度并排比对，用来核对碰撞体与 splat 表面是否贴合 */
+function toggleMeshDepth() {
+  const w = win();
+  const api = w && w.__mgMeshDepth;
+  if (!api) { toast('三维场景尚未就绪，请稍候再试'); return; }
+  if (api.supported === false) { toast('当前设备 / 后端不支持深度数据纹理'); return; }
+  const on = api.toggle();
+  if (on && w.__mgDepth && !w.__mgDepth.isOpen) w.__mgDepth.open();
+  toast(on ? '碰撞 Mesh 深度：开（与 3DGS 深度并排对比）' : '碰撞 Mesh 深度：关');
+  syncStatus();
+}
+
 function toast(msg) {
   try { if (typeof window.showToast === 'function') { window.showToast(msg); return; } } catch (_) { /* noop */ }
   const t = $('toast'), x = $('toastText');
@@ -145,7 +168,12 @@ function ensureFrame(scene, spawn) {
   f.title = '3DGS 全屏三维实景 · ' + scene;
   f.setAttribute('allow', 'fullscreen; clipboard-write');
   f.dataset.scene = scene;
-  f.src = './gs-viewer.html?embed=showroom&scene=' + scene + '&spawn=' + spawn;
+  /* ?content= 要显式透传进 iframe：app.js 读的是 iframe 自己的 location.search，
+     而 iframe 地址原本只带 scene/spawn —— 不透传的话 A/B 换资产永远不会生效
+     （诊断时踩过一次：以为换了数据，其实两份图完全相同）。 */
+  const inheritContent = new URLSearchParams(location.search).get('content');
+  f.src = './gs-viewer.html?embed=showroom&scene=' + scene + '&spawn=' + spawn +
+    (inheritContent ? '&content=' + encodeURIComponent(inheritContent) : '');
   f.addEventListener('load', () => {
     // 新 Viewer 实例要从当前亮度起渲染（app.js 也会自己读 localStorage，
     // 这里再发一次，覆盖「脚本尚未执行完」的窗口）
@@ -711,7 +739,7 @@ async function copyLan() {
   toast((ok ? '已复制局域网地址：' : '局域网地址：') + url);
 }
 function fixedClean() {
-  toast('当前部署包固定加载「已清理模糊点」版，无需切换（原始版未打包）');
+  toast('当前部署包固定加载原始未清理的 LOD0 资产，无需切换');
 }
 function syncStatus() {
   const el = $('gs-status');
@@ -746,6 +774,8 @@ const GROUPS = [
     ['自动取景 F', () => { press('f'); toast('已自动取景（全景）'); }],
     ['全屏 F11', () => { try { window.toggleFullscreen?.(); } catch (_) {} }],
     ['碰撞开关 C', () => { click('mg-collision'); setTimeout(syncStatus, 120); }],
+    ['实时深度图 N', () => toggleDepth()],
+    ['碰撞 Mesh 深度对比', () => toggleMeshDepth()],
     ['小地图 M', () => toggleMap()],
     ['小地图跟随', () => { const s = mapApi?.getState?.(); mapApi?.setFollow?.(!s?.follow); toast('已切换跟随'); }],
     ['3D / 俯视', () => { const s = mapApi?.getState?.(); mapApi?.setMode?.(s?.mode === '3d' ? 'top' : '3d'); }],
@@ -791,7 +821,7 @@ const GROUPS = [
     ['场景工具 T', () => { click('mg-tools'); toggleConsole(true); toast('已打开三维功能控制台'); }],
     ['操作说明', () => openHelp()],
     ['局域网地址', () => copyLan()],
-    ['清理开关 G', () => fixedClean()],
+    ['资产版本', () => fixedClean()],
     ['渲染器状态', () => { syncStatus(); const r = win()?.__mgRenderer; toast('渲染后端：' + (r?.renderer || '检测中')); }],
     ['刷新状态', () => syncStatus()]
   ] }

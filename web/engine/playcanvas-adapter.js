@@ -153,6 +153,22 @@ export function createPlayCanvasAdapter({ getApp, getCameraEntity, getPickView }
       return cam ? [cam.nearClip, cam.farClip] : [0.1, 1000];
     },
 
+    /* 主相机这一帧的 proj × view（列主序 + 列向量）。CPU 光栅化碰撞 mesh 深度时
+       必须和 3DGS 采样同口径，所以直接用引擎刚渲染完帧里的那两份矩阵。
+       用 copy + mul 而不是 mul2(a, b)：这个构建的矩阵实现曾在离屏通道里产出过
+       垃圾矩阵（贴花 / mesh 深度整片空的真凶之一），copy+mul 是验证过的写法。 */
+    getCameraViewProjection() {
+      const e = adapter.getCameraEntity();
+      const cam = e && e.camera;
+      if (!cam || !P || !P.Mat4) return null;
+      try {
+        const vp = new P.Mat4();
+        vp.copy(cam.projectionMatrix);
+        vp.mul(cam.viewMatrix);
+        return Float32Array.from(vp.data);
+      } catch (_) { return null; }
+    },
+
     // ---- C. 材质与着色器 ----
     createShaderMaterial(spec) {
       if (!P || !P.ShaderMaterial) return null;
@@ -635,7 +651,8 @@ export function createPlayCanvasAdapter({ getApp, getCameraEntity, getPickView }
       try { pass.texture.destroy(); } catch (_) { /* noop */ }
       try { pass.target.destroy(); } catch (_) { /* noop */ }
       try { pass.material.destroy(); } catch (_) { /* noop */ }
-    }
+    },
+
   };
 
   return createEngineAdapter(adapter, {

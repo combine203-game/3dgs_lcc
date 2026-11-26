@@ -160,13 +160,23 @@ export function makeAnnotation(kind, points, patch = {}) {
     rect: patch.rect || null,
     surface: patch.surface || null,
     projector: patch.projector || null,
+    /* 动线（line）贴地中心线：与贴花同源的「深度反算」结果 ——
+       把等距重采样后的每个点用当前相机投到屏幕、取该像素的场景深度反算回世界
+       表面点，得到一条真正贴着地面 / 台阶 / 坡道起伏的稠密折线。
+       只在绘制 / 改点 / 模型换层后算一次（异步），与相机无关、可持久化，
+       浏览态直接照抄即可贴地，不需要任何拾取能力。
+       drapeMeta = { pointsSig, v, step, source, stats, at }：pointsSig 是算这条
+       线时的原始顶点签名，顶点一改就判定失效（overlay 会退回原始折线，等重算）。 */
+    drape: patch.drape || null,
+    drapeMeta: patch.drapeMeta || null,
     order: patch.order ?? Date.now(),
     visible: patch.visible ?? true,
     locked: patch.locked ?? false,
     // 逐注记「深度检测」：true = 被前方模型遮挡时隐藏（真实三维遮挡语义）；
-    // false = 始终置顶可见（DOM 叠加层默认行为）。与工具栏那个全局
-    // 「深度落点」开关互不相干：后者只管绘制时落点贴合 MESH 还是锁定平面。
-    depthTest: patch.depthTest ?? false,
+    // false = 始终置顶可见。与工具栏那个全局「深度落点」开关互不相干：
+    // 后者只管绘制时落点贴合 MESH 还是锁定平面。
+    // ★ 2026-11-23 起默认开启：标注属于场景里的实体，走到墙后就应该被挡住。
+    depthTest: patch.depthTest ?? true,
     author: patch.author || 'local',
     createdAt: patch.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -329,19 +339,26 @@ export function arrowChain(pts, halfW, segLen, phase = 0, opts = {}) {
  */
 export function arrowChainWorld(pts, halfW, segLen, phase = 0, opts = {}) {
   if (!Array.isArray(pts) || pts.length < 2 || !(halfW > 0) || !(segLen > 0)) return [];
+  const P = pts.filter(p => Array.isArray(p) && p.length >= 3 && p.every(Number.isFinite));
+  if (P.length < 2) return [];
   const norm3 = (v) => {
     const l = Math.hypot(v[0], v[1], v[2]) || 1;
     return [v[0] / l, v[1] / l, v[2] / l];
   };
   const cum = [0];
-  for (let i = 1; i < pts.length; i++) {
-    const a = pts[i - 1], b = pts[i];
+  for (let i = 1; i < P.length; i++) {
+    const a = P[i - 1], b = P[i];
     cum.push(cum[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]));
   }
   const total = cum[cum.length - 1];
   if (!(total > 1e-4)) return [];
-  const n = Math.max(1, Math.min(96, Math.round(total / Math.max(0.05, segLen))));
-  const L = total / n;
+
+  /* ★ 段长固定 = segLen。
+     旧实现 `n = round(total/segLen); L = total/n` 把总长量化成整数段：贴地折线
+     是逐点吸附出来的，逐帧重算时 total 每帧都在小幅变化，L 跟着在
+     [segLen*0.75, segLen*1.5] 之间跳 —— 这就是「贴地动画过程中箭头大小会变化」。
+     现在 L 恒定：总长变化只改变段数，箭头本身尺寸不变。 */
+  const L = segLen;
   const arrow = opts.arrow !== false;
   const gap = Math.max(0, Math.min(0.3, opts.gap ?? 0.1));
   const headRatio = Math.max(0.2, Math.min(0.6, opts.headRatio ?? 0.44));
@@ -350,47 +367,155 @@ export function arrowChainWorld(pts, halfW, segLen, phase = 0, opts = {}) {
   const headStart = tip - L * headRatio;
   const notch = L * notchRatio;
 
-  /** 按弧长取中心点与水平侧向单位向量（lateral = tangent × worldUp） */
-  const at = (d) => {
+  /** 按弧长取中心点（二分查找；位置永远取自原始折线，不做位置平滑，
+   *  否则贴合结果会被拽离模型表面）。 */
+  const centerAt = (d) => {
     const dd = Math.max(0, Math.min(total, d));
-    let i = 1;
-    while (i < cum.length - 1 && cum[i] < dd) i++;
-    const a = pts[i - 1], b = pts[i];
-    const l = (cum[i] - cum[i - 1]) || 1e-6;
-    const t = (dd - cum[i - 1]) / l;
-    const c = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-    const tx = (b[0] - a[0]) / l, ty = (b[1] - a[1]) / l, tz = (b[2] - a[2]) / l;
-    // cross(tangent, [0,1,0]) = (-tz, 0, tx)：水平侧向，面片保持水平贴合地面
-    let lat = [-tz, 0, tx];
-    if (Math.hypot(lat[0], lat[1], lat[2]) < 1e-4) {
-      // 切线接近竖直（沿墙面向上 / 竖管）：退回 cross(tangent, [1,0,0]) = (0, tz, -ty)
-      lat = [0, tz, -ty];
-      if (Math.hypot(lat[0], lat[1], lat[2]) < 1e-4) lat = [0, 0, 1];
+    let lo = 1, hi = cum.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] < dd) lo = mid + 1; else hi = mid;
     }
-    return { c, lat: norm3(lat) };
+    const i = Math.max(1, lo);
+    const a = P[i - 1], b = P[i];
+    const l = (cum[i] - cum[i - 1]) || 1e-6;
+    const t = Math.max(0, Math.min(1, (dd - cum[i - 1]) / l));
+    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
   };
 
-  const polys = [];
-  const frac = ((phase % 1) + 1) % 1;
-  for (let i = -1; i <= n; i++) {
-    const raw = (i + frac) * L;                  // 与屏幕版一致：随相位向 +s 推进
-    if (raw >= total) continue;
-    // 端点残段整体等比缩短（同屏幕版），避免多个顶点塌成一点拉出尖刺
-    const start = Math.max(0, raw);
-    const end = Math.min(total, raw + tip);
-    const avail = end - start;
-    if (avail < tip * 0.35) continue;
-    const k = avail / tip;
+  /* 稳定坐标系表（★ 修「箭头是乱的」）：
+     旧实现每个轮廓顶点都按「它自己所在那一段」的切线算侧向。贴地折线逐点吸附
+     后难免有厘米级横向抖动，相邻样本的切线会左右偏摆甚至反向，同一个箭头的
+     两个腰被推向相反方向 → K 形 / 三角尖刺 / 相互穿插。
+     做法：① 切线取 ±win 窗口内的平均方向（抗抖）；
+           ② 侧向逐样本做符号连续（+lat 永远同一侧），路径折返时箭头不镜像；
+           ③ 相邻样本间线性插值，轮廓顶点之间不再有突变。 */
+  const ds = Math.max(0.06, L * 0.08);
+  const win = Math.max(ds, L * 0.55);
+  /* 视线方向（可选）：只用于「切线垂直」这类世界中立参考失效的退化段。 */
+  const view0 = (() => {
+    const v = opts.viewDir;
+    if (!Array.isArray(v) || v.length < 3) return null;
+    const l = Math.hypot(v[0], v[1], v[2]);
+    return l > 1e-6 ? [v[0] / l, v[1] / l, v[2] / l] : null;
+  })();
+  const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const table = [];
+  const nF = Math.max(1, Math.ceil(total / ds));
+  let prevLat = null;
+  for (let i = 0; i <= nF; i++) {
+    const d = Math.min(total, i * ds);
+    const c = centerAt(d);
+    const a = centerAt(Math.max(0, d - win));
+    const b = centerAt(Math.min(total, d + win));
+    let t = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let tl = Math.hypot(t[0], t[1], t[2]);
+    if (!(tl > 1e-6)) {                        // 窗口内原地折返：退回局部差分
+      const lo = centerAt(Math.max(0, d - ds * 0.5));
+      const hi = centerAt(Math.min(total, d + ds * 0.5));
+      t = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+      tl = Math.hypot(t[0], t[1], t[2]) || 1;
+    }
+    t = [t[0] / tl, t[1] / tl, t[2] / tl];
+    /* 侧向 = 「水平垂直方向」与「面向观察者」的平滑混合。
+       · 平贴地面的路段（水平分量大）：lat = 切线 × 世界 up，面片铺在地面上；
+       · 沿墙面向上爬 / 竖管 / 楼梯立面（切线越陡）：世界 up 参考失效，叉积长度趋近 0，
+         方向还变成「墙的法向」—— 面片垂直于墙面伸出去，侧视只剩一条尖刺，
+         相邻样本方向乱跳，这就是用户看到的「箭头旋转变化」。
+         此时按陡峭程度平滑过渡到 lat = 切线 × 视线：面片落在面向观察者的竖直平面里，
+         看起来仍是一枚朝向正常的箭头，过渡处也不会突然转向。
+       两个候选都与切线垂直，任意正组合仍然与切线垂直，带身永远不会被压扁。 */
+    const aLat = cross3(t, [0, 1, 0]);
+    const ah = Math.hypot(aLat[0], aLat[1], aLat[2]);      // = 切线的水平分量长度
+    let lat = null, ll = 0;
+    if (view0 && ah > 1e-4) {
+      const bLat = cross3(t, view0);
+      const bl = Math.hypot(bLat[0], bLat[1], bLat[2]);
+      if (bl > 1e-6) {
+        const w = Math.min(1, ah / 0.55);                  // 越陡越偏向「面向观察者」
+        lat = [aLat[0] / ah * w + bLat[0] / bl * (1 - w),
+          aLat[1] / ah * w + bLat[1] / bl * (1 - w),
+          aLat[2] / ah * w + bLat[2] / bl * (1 - w)];
+        ll = Math.hypot(lat[0], lat[1], lat[2]);
+      }
+    }
+    if (!(ll > 1e-6)) {                                     // 没有视线兜底：退回纯世界参考
+      lat = aLat;
+      ll = ah;
+      if (!(ll > 1e-4)) {
+        lat = cross3(t, [1, 0, 0]);
+        ll = Math.hypot(lat[0], lat[1], lat[2]);
+      }
+    }
+    lat = ll > 1e-6 ? [lat[0] / ll, lat[1] / ll, lat[2] / ll] : (prevLat || [1, 0, 0]);
+    if (prevLat && (lat[0] * prevLat[0] + lat[1] * prevLat[1] + lat[2] * prevLat[2]) < 0) {
+      lat = [-lat[0], -lat[1], -lat[2]];       // 路径折返：保持同侧，箭头不镜像
+    }
+    prevLat = lat;
+    table.push({ d, c, lat });
+  }
+
+  const frameAt = (d) => {
+    const dd = Math.max(0, Math.min(total, d));
+    let lo = 0, hi = table.length - 1;
+    while (lo < hi - 1) {
+      const mid = (lo + hi) >> 1;
+      if (table[mid].d <= dd) lo = mid; else hi = mid;
+    }
+    const A = table[lo], B = table[Math.min(table.length - 1, lo + 1)];
+    const span = (B.d - A.d) || 1;
+    const t = Math.max(0, Math.min(1, (dd - A.d) / span));
+    return {
+      c: [A.c[0] + (B.c[0] - A.c[0]) * t,
+        A.c[1] + (B.c[1] - A.c[1]) * t,
+        A.c[2] + (B.c[2] - A.c[2]) * t],
+      lat: [A.lat[0] + (B.lat[0] - A.lat[0]) * t,
+        A.lat[1] + (B.lat[1] - A.lat[1]) * t,
+        A.lat[2] + (B.lat[2] - A.lat[2]) * t],
+    };
+  };
+
+  /* 单个箭头面片：中心点沿路径，侧向用帧表（急弯时整段改用中段侧向，
+     避免内外腰交叉成尖刺）。 */
+  const buildPoly = (start, avail, k) => {
     const hs = headStart * k, nt = notch * k;
     const outline = arrow
       ? [[0, -halfW], [hs, -halfW], [avail, 0],
          [hs, halfW], [0, halfW], [nt, 0]]
       : [[0, -halfW], [avail, -halfW], [avail, halfW], [0, halfW]];
-    const poly = outline.map(([u, v]) => {
-      const q = at(start + u);
-      return [q.c[0] + q.lat[0] * v, q.c[1] + q.lat[1] * v, q.c[2] + q.lat[2] * v];
+    const fA = frameAt(start), fB = frameAt(start + avail);
+    const fold = (fA.lat[0] * fB.lat[0] + fA.lat[1] * fB.lat[1] + fA.lat[2] * fB.lat[2]) < 0.3;
+    const fixedLat = fold ? norm3(frameAt(start + avail * 0.5).lat) : null;
+    return outline.map(([u, v]) => {
+      const q = frameAt(start + u);
+      const lat = fixedLat || norm3(q.lat);
+      return [q.c[0] + lat[0] * v, q.c[1] + lat[1] * v, q.c[2] + lat[2] * v];
     });
-    polys.push(poly);
+  };
+
+  /* 短路径（草稿预览 / 坍塌贴合 / 短线，长度不足两个箭头）：固定画一个居中箭头。
+     如果继续走下面的循环，某些相位下「整段箭头放不下」会把所有箭头都跳过 ——
+     视觉上就是箭头周期性消失，上层还会误判「箭头链不可用」退回折线兜底。
+     画一个不随相位移动的箭头，尺寸恒定、永不闪烁。 */
+  if (total < 2 * tip) {
+    const avail = Math.min(tip, total);
+    const start = Math.max(0, (total - avail) / 2);
+    return [buildPoly(start, avail, Math.max(0.2, avail / tip))];
+  }
+
+  const polys = [];
+  const frac = ((phase % 1) + 1) % 1;
+  const count = Math.min(256, Math.ceil(total / L) + 2);
+  for (let i = -1; i <= count; i++) {
+    const raw = (i + frac) * L;                  // 随相位向 +s（箭头指向）推进
+    if (raw >= total) continue;
+    const start = Math.max(0, raw);
+    const avail = Math.min(total, raw + tip) - start;
+    /* 端点残段直接不画。旧实现按 k=avail/tip 等比缩短，于是每个箭头流到路径
+       尽头时都会「缩一下」—— 动画里看到的就是「箭头大小在变化」。 */
+    if (avail < tip * 0.9) continue;
+    polys.push(buildPoly(start, avail, 1));
   }
   return polys;
 }
@@ -537,6 +662,33 @@ export function rotateByQuat(v, q) {
     y + qw * ty + (qz * tx - qx * tz),
     z + qw * tz + (qx * ty - qy * tx)
   ];
+}
+
+/** 四元数乘法（Hamilton 积）：a ∘ b =「先施加 b，再施加 a」，与 rotateByQuat 同一约定 [x,y,z,w] */
+export function quatMul(a, b) {
+  const [ax, ay, az, aw] = a, [bx, by, bz, bw] = b;
+  return [
+    aw * bx + ax * bw + ay * bz - az * by,
+    aw * by - ax * bz + ay * bw + az * bx,
+    aw * bz + ax * by - ay * bx + az * bw,
+    aw * bw - ax * bx - ay * by - az * bz
+  ];
+}
+
+/** 轴角 -> 四元数（axis 内部自动单位化，零向量退化为单位四元数） */
+export function quatFromAxis(axis, angle) {
+  const [x, y, z] = Array.isArray(axis) ? axis : [0, 1, 0];
+  const len = Math.hypot(x, y, z);
+  const h = (Number(angle) || 0) * 0.5;
+  if (!(len > 1e-9)) return [0, 0, 0, 1];
+  const s = Math.sin(h) / len;
+  return [x * s, y * s, z * s, Math.cos(h)];
+}
+
+/** 四元数单位化（防多次相乘后累积漂移） */
+export function quatNormalize(q) {
+  const n = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  return [q[0] / n, q[1] / n, q[2] / n, q[3] / n];
 }
 
 /**

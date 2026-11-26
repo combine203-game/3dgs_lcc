@@ -427,6 +427,15 @@ async function main() {
     /cam\.projection = isPersp \? P\.PROJECTION_PERSPECTIVE/.test(adapterSrc));
   check('uPersp / uProjNear 已登记为 shader uniform',
     /'uPersp', 'uProjNear'/.test(shaderSrc));
+  /* PlayCanvas WebGL2 的 WebglShaderProcessorGLSL 会把 VS/FS 的 uniform 行按整行
+     字符串去重后重新声明到两个阶段：两侧写法差一个空格就会生成两份同名声明，
+     编译报 "'uProjVP' : redefinition"，整块贴花在 WebGL2 上完全不投射。 */
+  const shadowVsGlsl = /DECAL_SHADOW_VERTEX_GLSL = \/\* glsl \*\/ `([\s\S]*?)`;/.exec(shaderSrc)?.[1] || '';
+  // 不做空白归一化：PlayCanvas 就是按原始行文本去重的，差一个空格就是两份声明
+  const uProjDecl = (src) => (src.match(/uniform\s+\w+\s+uProjVP\s*;/g) || []).map(s => s.trim());
+  check('GLSL 共享 uniform（uProjVP）顶点/片元声明逐字符一致（WebGL2 合并去重）',
+    uProjDecl(shadowVsGlsl).length === 1 && uProjDecl(glsl).length === 1 &&
+    uProjDecl(shadowVsGlsl)[0] === uProjDecl(glsl)[0], [uProjDecl(shadowVsGlsl), uProjDecl(glsl)]);
 
   console.log('\n页面错误：', errors.length, errors.slice(0, 5));
   check('无 JS 异常 / console error', errors.length === 0, errors.slice(0, 3));

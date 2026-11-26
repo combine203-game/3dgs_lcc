@@ -204,7 +204,9 @@ async function main() {
       depth:d.querySelector('[data-act="depth"]')?.textContent,
       wasd:!!d.querySelector('.ed-wasd'),
       mesh:w.__mgEditor?.getState?.().meshStatus, tris:w.__mgEditor?.getState?.().meshTris,
-      sseHidden:(()=>{const e=d.querySelector('.sse-controlsWrap');return !e||getComputedStyle(e).display==='none';})()};})()`);
+      sseHidden:(()=>{const e=d.querySelector('.sse-controlsWrap');return !e||getComputedStyle(e).display==='none';})(),
+      camMode:w.__viewer?.state?.cameraMode, flyFlag:!!w.__mgEditorFly,
+      hint:(d.querySelector('[data-role="hint"]')||{}).textContent||''};})()`);
   check('父页模式切到编辑态', s2.host?.on === true, s2.host);
   check('data-gs-editor=on', s2.attr === 'on');
   check('浏览 UI 隐藏（stage=none）', s2.stage === 'none', s2.stage);
@@ -217,6 +219,10 @@ async function main() {
   check('MESH 拾取就绪', s2.mesh === 'ready' && s2.tris > 0, s2.mesh + '/' + s2.tris);
   check('引擎自带控件已隐藏', s2.sseHidden === true);
   check('父页已让路（autoRender=false）', s2.paused === true);
+  // 编辑画贴花要贴墙、布点要俯视，walk 的「离地 1.6m 胶囊」姿态碍事 → 默认飞行
+  check('编辑器默认飞行相机（cameraMode=fly + __mgEditorFly）',
+    s2.camMode === 'fly' && s2.flyFlag === true, [s2.camMode, s2.flyFlag]);
+  check('状态行同步显示自由飞行', /自由飞行/.test(s2.hint || ''), s2.hint);
   console.log(`    挂载耗时 ${s2.mountMs}ms（预载命中时通常 < 20ms）`);
 
   console.log('\n[4] 交互：单击落点 / 拖拽放行 / 键盘');
@@ -438,7 +444,8 @@ async function main() {
       exitHidden:getComputedStyle(document.getElementById('gs-editor-exit')).display==='none',
       unmounted:!w.__mgEditor,uiRemoved:!d.querySelector('.ed-ui'),
       clsOff:!d.documentElement.classList.contains('mg-editor-on'),
-      autoRender:w.__viewer.app.autoRender};})()`);
+      autoRender:w.__viewer.app.autoRender,
+      flyFlag:!!w.__mgEditorFly, camMode:w.__viewer?.state?.cameraMode};})()`);
   check('父页回到浏览态', s4.host?.on === false, s4.host);
   check('data-gs-editor=off', s4.attr === 'off');
   check('浏览 UI 恢复', s4.stage === 'block', s4.stage);
@@ -446,6 +453,8 @@ async function main() {
   check('编辑器已卸载', s4.unmounted === true && s4.uiRemoved === true);
   check('编辑标记已清除', s4.clsOff === true);
   check('渲染已恢复', s4.autoRender === true);
+  // 飞行只是编辑态默认：退出时标记必须复位，浏览态不被污染
+  check('退出编辑后飞行标记复位', s4.flyFlag === false, s4.flyFlag);
 
   console.log('\n[11] 新交互：列表按钮 / 双击飞入 / 双击结束 / 右键取消 / 展板拖拽');
   const s12 = await E(`(async()=>{
@@ -786,6 +795,9 @@ async function main() {
     const out={};
     const b=ed.store.list('floor1').find(a=>a.kind==='board');
     if(!b)return{error:'no board'};
+    // 深度检测已改为默认开启：本组用「恒定命中 12m」的碰撞桩模拟吸附，会把展板
+    // 判成被遮挡而整块隐藏 —— 这里显式关掉，专注验证引线锚点交互。
+    ed.store.update(b.id,{depthTest:false});
     ed.action('select',b.id);
     await sleep(250);
     const item=d.querySelector('.ed-item[data-kind="board"]');
@@ -968,6 +980,41 @@ async function main() {
     const bent=mod.arrowChain([{x:0,y:0},{x:120,y:0},{x:120,y:120}],hw,72,0,{arrow:true});
     out.bendFollows=bent.length>0;
 
+    /* 世界箭头链：单个箭头的大小必须与「路径总长 / 相位」无关。
+       旧实现 n=round(total/segLen)、L=total/n，贴地结果逐帧微调 total 时
+       L 会跳变，动画里看到的就是「箭头忽大忽小」。 */
+    const chord=(poly)=>Math.hypot(poly[2][0]-poly[0][0],poly[2][2]-poly[0][2]);
+    const shortW=mod.arrowChainWorld([[0,0,0],[0,0,4]],0.3,1.4,0.1,{arrow:true});
+    const longW=mod.arrowChainWorld([[0,0,0],[0,0,12]],0.3,1.4,0.63,{arrow:true});
+    out.worldArrows=shortW.length>0&&longW.length>shortW.length;
+    out.worldSizeStable=shortW.length>0&&longW.length>0&&
+      Math.abs(chord(shortW[0])-chord(longW[0]))<0.02;
+    // 抖动折线（贴地逐点吸附的真实形态）：同一个箭头的两个腰必须同向，不得翻折
+    const jitter=[];for(let i=0;i<=40;i++)jitter.push([i*0.45,0,Math.sin(i*1.7)*0.06]);
+    const jw=mod.arrowChainWorld(jitter,0.3,1.4,0.4,{arrow:true});
+    out.worldNoSpike=jw.length>0&&jw.every(p=>{
+      const wid=Math.hypot(p[4][0]-p[0][0],p[4][2]-p[0][2]);
+      return Math.abs(wid-0.6)<0.06;                 // 带身宽度恒为 2*halfW
+    });
+    /* 沿墙面向上（切线接近竖直）：世界 up 做参考会退化。旧代码退回 (0,tz,-ty)，
+       面片垂直于墙面伸出去 → 侧视只剩一条尖刺，且相邻样本方向乱跳（「箭头旋转变化」）。
+       给 viewDir 后应改用「切线 × 视线」，带身仍保持 2*halfW 宽且落在墙面平面内。 */
+    const wall=[];for(let i=0;i<=20;i++)wall.push([0,i*0.45,0]);
+    const ww=mod.arrowChainWorld(wall,0.315,1.45,0.35,{arrow:true,viewDir:[-1,0,0]});
+    out.wallWidthOk=ww.length>0&&ww.every(p=>{
+      const wid=Math.hypot(p[4][0]-p[0][0],p[4][1]-p[0][1],p[4][2]-p[0][2]);
+      return Math.abs(wid-0.63)<0.05;
+    });
+    // 侧向必须垂直于视线（贴墙展开），不能指向相机
+    out.wallLatOk=ww.length>0&&ww.every(p=>{
+      const lx=p[4][0]-p[0][0],ly=p[4][1]-p[0][1],lz=p[4][2]-p[0][2];
+      return Math.abs(lx)<0.05;                      // viewDir=(-1,0,0) => lat 里不能含 X 分量
+    });
+    // 动线本体保留不可见宽描边做命中区（箭头缝隙里点击才不会穿透成「新建标注」）
+    const hitSlop=d.querySelector('.ed-g[data-id="'+route.id+'"] .ed-shape');
+    out.flowHitSlop=!!hitSlop&&hitSlop.style.pointerEvents==='stroke'&&
+      Number(hitSlop.getAttribute('stroke-width'))>=12;
+
     const before=d.querySelector('.ed-g[data-id="'+route.id+'"] .ed-flow-arrow-seg')?.getAttribute('points');
     const bw=d.querySelector('.ed-prop [data-field="bandWidth"]');
     out.hasBandInput=!!bw;
@@ -1005,6 +1052,14 @@ async function main() {
   check('纯几何：轮廓无外扩鼓包（横向不越界）', s17.noBulge === true);
   check('纯几何：箭头尖 / 尾凹口都在中心线上', s17.tipOnAxis === true && s17.notchOnAxis === true);
   check('纯几何：弯道处箭头随折线转向', s17.bendFollows === true);
+  check('世界箭头链：段数随路径变长而增加，单箭头大小不变（动画中不再忽大忽小）',
+    s17.worldArrows === true && s17.worldSizeStable === true);
+  check('世界箭头链：贴地抖动折线上带身宽度恒定（不翻折 / 不出尖刺）',
+    s17.worldNoSpike === true);
+  check('世界箭头链：沿墙面向上时侧向不退化（贴墙展开，不变成垂直于墙的尖刺）',
+    s17.wallWidthOk === true && s17.wallLatOk === true);
+  check('动线本体有不可见宽描边命中区（缝隙点击不会穿透成新建标注）',
+    s17.flowHitSlop === true);
   check('关闭箭头后退化为 4 点等宽矩形段', s17.rectOutline === true && s17.rectWidth === true);
   check('属性面板可调动线带宽', s17.hasBandInput === true && s17.widthStored === true);
   check('带宽改变后箭头段顶点变化', s17.widthChanged === true);
@@ -1152,6 +1207,63 @@ async function main() {
     await sleep(240);
     out.screenClickKeeps=JSON.stringify(ed.store.get(sc.id).points[0])===scBefore;
     out.screenClickSelects=ed.getState().selectedId===sc.id;
+
+    // ---------- J. 绘制工具下点中已有对象：退出绘制工具，且不新建标注 ----------
+    const cnt0=ed.store.list('floor1').length;
+    ed.action('tool','point');
+    const itm=d.querySelector('.ed-item[data-id="'+sc.id+'"]');
+    if(itm) itm.dispatchEvent(new w.MouseEvent('click',{bubbles:true,cancelable:true}));
+    await sleep(200);
+    out.pickExitsTool=ed.getState().tool==='select';
+    out.pickNoNew=ed.store.list('floor1').length===cnt0;
+    out.pickSelects=ed.getState().selectedId===sc.id;
+    // 面板多采样遮挡：三维屏取四角 + 中心 5 个世界点，只有全部被挡才隐藏
+    out.occlSamples=(ed.overlay._occludePoints(ed.store.get(sc.id))||[]).length;
+
+    // ---------- I. 底心旋转锚点：拖动只改朝向（yaw/pitch），位置不变 ----------
+    ed.action('select',sc.id);
+    try{ ed.overlay.frame(); }catch(_){ /* 无头帧率极低，同步渲一帧确保手柄已创建 */ }
+    await sleep(160);
+    const rot=d.querySelector('.ed-screen-rot .ed-screen-rot-hit');
+    out.hasRot=!!rot;
+    const rotPos0=JSON.stringify(ed.store.get(sc.id).points[0]);
+    const rotYaw0=Number(ed.store.get(sc.id).style.yaw||0);
+    if(rot){
+      const rb=rot.getBoundingClientRect();
+      const rcx=rb.left+rb.width/2, rcy=rb.top+rb.height/2;
+      rot.dispatchEvent(mk('pointerdown',rcx,rcy));
+      for(const k of [0.4,0.8,1]) d.dispatchEvent(mk('pointermove',rcx+90*k,rcy));
+      d.dispatchEvent(mk('pointerup',rcx+90,rcy));
+      await sleep(200);
+    }
+    out.rotYaw=Number(ed.store.get(sc.id).style.yaw||0);
+    out.rotYawMoved=Math.abs(out.rotYaw-rotYaw0)>5;
+    out.rotPosKept=JSON.stringify(ed.store.get(sc.id).points[0])===rotPos0;
+
+    /* ---------- I2. 左键松开但 pointerup 丢失（在 iframe 外松手）----------
+       锚点拖拽必须立刻停下：只靠 pointerup 收尾会留下「幽灵拖拽」，
+       之后随便动鼠标视锥体还在转（用户反馈）。这里用真实事件语义
+       （isTrusted + buttons）复现：第一下 pressed，第二下 buttons=0。 */
+    if(rot){
+      const rb2=rot.getBoundingClientRect();
+      const rcx2=rb2.left+rb2.width/2, rcy2=rb2.top+rb2.height/2;
+      const pe=(t,x,y,buttons)=>new w.PointerEvent(t,
+        {clientX:x,clientY:y,bubbles:true,cancelable:true,pointerId:9,button:0,
+          buttons,pointerType:'mouse'});
+      const mv=(x,y,buttons)=>d.dispatchEvent(pe('pointermove',x,y,buttons));
+      const yawA=Number(ed.store.get(sc.id).style.yaw||0);
+      // 真实鼠标按下的语义：pointerdown 的 buttons = 1（左键），兜底判断才会启用
+      rot.dispatchEvent(pe('pointerdown',rcx2,rcy2,1));
+      mv(rcx2+40,rcy2,1);
+      const yawB=Number(ed.store.get(sc.id).style.yaw||0);
+      mv(rcx2+160,rcy2,0);                 // 松手后（pointerup 丢了）：必须收尾
+      const yawC=Number(ed.store.get(sc.id).style.yaw||0);
+      mv(rcx2+260,rcy2,1);                 // 拖拽已结束：再移动也不该继续调整
+      const yawD=Number(ed.store.get(sc.id).style.yaw||0);
+      out.lostUpMoved=Math.abs(yawB-yawA)>3;
+      out.lostUpStops=Math.abs(yawC-yawB)<0.01;
+      out.lostUpStaysStopped=Math.abs(yawD-yawC)<0.01;
+    }
     return out;
   })()`);
   check('单击展板（含 2px 微抖）不改变位置', s18.clickKeepsPos === true);
@@ -1185,6 +1297,18 @@ async function main() {
   check('相机绕到背面显示金属背板', s18.backClass === true);
   check('单击实体屏只选中、位置不变',
     s18.screenClickKeeps === true && s18.screenClickSelects === true);
+  check('绘制工具下点中已有对象：自动退出绘制工具、只选中、不新建',
+    s18.pickExitsTool === true && s18.pickNoNew === true && s18.pickSelects === true,
+    `tool=${s18.pickExitsTool} new=${s18.pickNoNew}`);
+  check('三维屏遮挡判定用四角 + 中心多采样（单点被挡不会整块消失）',
+    s18.occlSamples === 5, s18.occlSamples);
+  check('选中三维屏后底心出现旋转锚点', s18.hasRot === true);
+  check('拖动底心锚点改变朝向（yaw）且不移动屏体',
+    s18.rotYawMoved === true && s18.rotPosKept === true,
+    `yaw ${s18.rotYaw} / pos ${s18.rotPosKept}`);
+  check('锚点拖拽：左键松开（pointerup 丢失）后立即停止调整',
+    s18.lostUpMoved === true && s18.lostUpStops === true && s18.lostUpStaysStopped === true,
+    `moved=${s18.lostUpMoved} stops=${s18.lostUpStops}`);
 
   console.log('\n[18] 动线贴合模型表面（等距重采样 + 逐点吸附碰撞 MESH）');
   const s19 = await E(`(async()=>{
@@ -1219,6 +1343,8 @@ async function main() {
     // overlay 真的消费贴合结果：改顶点触发缓存重算，并用 spy 记录调用
     col.queryRay=(ox,oy,oz,dx,dy,dz)=>({x:ox+dx*0.45,y:oy+dy*0.45,z:oz+dz*0.45});
     const route=ed.store.list('floor1').find(a=>a.kind==='line');
+    // 深度检测默认开启；本组的碰撞桩命中点就在相机前方，会把动线判成遮挡隐藏
+    ed.store.update(route.id,{depthTest:false});
     const origPts=JSON.parse(JSON.stringify(route.points));
     let calls=0;const origDrape=ed.overlay.drapeLine;
     ed.overlay.drapeLine=(pts)=>{calls++;return origDrape(pts);};
@@ -1257,15 +1383,20 @@ async function main() {
     const mod=await import('./editor/schema.js');
     const fresh=mod.makeAnnotation('point',[[0,1,2]],{});
     out.modelHasProp=Object.prototype.hasOwnProperty.call(fresh,'depthTest');
-    out.modelDefault=fresh.depthTest===false;
+    out.modelDefault=fresh.depthTest===true;
     out.allHaveProp=ed.store.list('floor1').every(a=>typeof a.depthTest==='boolean');
 
     const pt=ed.store.list('floor1').find(a=>a.kind==='point');
     ed.action('select',pt.id);await sleep(300);
     const cb=d.querySelector('.ed-prop [data-field="depthTest"]');
     out.hasCtrl=!!cb;
-    out.defaultOff=cb?.checked===false;
-    cb.checked=true;cb.dispatchEvent(new w.Event('change',{bubbles:true}));
+    out.defaultOn=cb?.checked===true;
+    // 默认开 -> 先验证可以单独关掉（写回 false），再打开做遮挡测试
+    cb.checked=false;cb.dispatchEvent(new w.Event('change',{bubbles:true}));
+    await sleep(200);
+    out.offStored0=ed.store.get(pt.id).depthTest===false;
+    const cbOn=d.querySelector('.ed-prop [data-field="depthTest"]');
+    cbOn.checked=true;cbOn.dispatchEvent(new w.Event('change',{bubbles:true}));
     await sleep(200);
     out.onStored=ed.store.get(pt.id).depthTest===true;
 
@@ -1278,8 +1409,10 @@ async function main() {
     await sleep(320);
     out.occludedResult=ed.picker.occluded(pt.points[0]);
     out.hiddenWhenOn=!d.querySelector('.ed-item[data-id="'+pt.id+'"]');
-    // 独立性：另一个未开启深度检测的注记仍然可见
+    // 独立性：把另一条注记的深度检测单独关掉，它必须仍然可见
     const other=ed.store.list('floor1').find(a=>a.kind==='board');
+    ed.store.update(other.id,{depthTest:false});
+    await sleep(200);
     out.otherOff=ed.store.get(other.id).depthTest===false;
     out.otherVisible=!!d.querySelector('.ed-item[data-kind="board"]');
 
@@ -1294,8 +1427,10 @@ async function main() {
     return out;
   })()`);
   check('数据模型每个注记自带 depthTest 属性', s20.modelHasProp === true && s20.allHaveProp === true);
-  check('默认关闭（不改变原有置顶显示行为）', s20.modelDefault === true && s20.defaultOff === true);
+  check('默认开启深度检测（新标注落到墙后即被遮挡）',
+    s20.modelDefault === true && s20.defaultOn === true);
   check('属性面板提供「开启深度检测」开关', s20.hasCtrl === true);
+  check('可单独关闭（写回 false，不影响其它注记）', s20.offStored0 === true);
   check('开启后写回该注记（非全局开关）', s20.onStored === true);
   check('遮挡判定能识别前方 MESH', s20.occludedResult === true);
   check('开启深度检测后被遮挡的注记隐藏', s20.hiddenWhenOn === true);
@@ -1328,6 +1463,11 @@ async function main() {
     out.linePts=(line?.getAttribute('points')||'').trim().split(/\\s+/).filter(Boolean).length;
     const segs=[...d.querySelectorAll('.ed-draft-flow-seg')].filter(p=>p.style.display!=='none');
     out.previewSegs=segs.length;
+    const dr=ed.overlay._draft;
+    out.dbgPoints=ed.overlay.draft?ed.overlay.draft.points.length:-1;
+    out.dbgTool=ed.getState().tool;
+    out.dbgWorld=(dr?.flowWorld||[]).length;
+    out.dbgSegs=dr?.flowSegs?.length??null;
     out.previewArrows=segs.length>0&&segs.every(p=>(p.getAttribute('points')||'').trim().split(/\\s+/).filter(Boolean).length===6);
 
     const before=ed.store.list('floor1').length;
@@ -1342,6 +1482,8 @@ async function main() {
     await sleep(440);
     out.created=ed.store.list('floor1').length===before+1;
     const fresh=ed.store.list('floor1').filter(a=>a.kind==='line').pop();
+    // 深度检测默认开启 + 本组碰撞桩命中就在相机前方：显式关掉，专注验证绘制可见性
+    ed.store.update(fresh.id,{depthTest:false});
     const g=d.querySelector('.ed-g[data-id="'+fresh.id+'"]');
     out.visibleSegs=[...(g?g.querySelectorAll('.ed-flow-arrow-seg'):[])].filter(p=>p.style.display!=='none').length;
     out.stroke=g?.querySelector('.ed-shape')?.getAttribute('stroke');
@@ -1371,7 +1513,8 @@ async function main() {
   check('草稿有深色光晕 + 亮色主线（双层可见）',
     s21.hasHalo === true && s21.hasLine === true && s21.linePts >= 2 && s21.haloPts >= 2,
     `${s21.linePts}/${s21.haloPts}`);
-  check('绘制中的动线实时预览世界空间贴合面片', s21.previewSegs > 0 && s21.previewArrows === true, s21.previewSegs);
+  check('绘制中的动线实时预览世界空间贴合面片', s21.previewSegs > 0 && s21.previewArrows === true,
+    `${s21.previewSegs} seg / pts=${s21.dbgPoints} world=${s21.dbgWorld} all=${s21.dbgSegs}`);
   check('右键结束绘制后生成可见的动线（不是只有点）',
     s21.created === true && s21.hasVisibleLine === true, `${s21.visibleSegs} 段 / ${s21.stroke}`);
   check('箭头链退化时折线兜底为可见描边',
@@ -1593,7 +1736,18 @@ async function main() {
     const edges=[...d.querySelectorAll('.ed-g[data-id="'+decal.id+'"] .ed-decal-obb-edge')]
       .filter(e=>e.style.display!=='none');
     out.edgeCount=edges.length;
-    out.edgesVisible=edges.length===12;
+    /* 棱线改「逐段绘制」以支持场景深度判断：段数必须是 12 的整数倍
+       （12 条棱 × SEG，选中时 SEG=6）。不再写死 12，避免以后调段数就误报。 */
+    out.edgeSeg=edges.length>=12&&edges.length%12===0?edges.length/12:0;
+    out.edgesVisible=out.edgeSeg>0;
+    // 旋转环：正交 OBB 选中时必须有 3 条 ring（X/Y/Z）与 3 条透明命中区
+    const rings=[...d.querySelectorAll('.ed-g[data-id="'+decal.id+'"] .ed-decal-ring')]
+      .filter(e=>e.style.display!=='none');
+    const ringHits=[...d.querySelectorAll('.ed-g[data-id="'+decal.id+'"] .ed-decal-ring-hit')]
+      .filter(e=>e.style.display!=='none');
+    out.ringCount=rings.length;
+    out.ringHits=ringHits.length;
+    out.ringAxes=[...new Set(rings.map(e=>e.dataset.axis))].sort().join(',');
     const handles=[...d.querySelectorAll('.ed-g[data-id="'+decal.id+'"] .ed-decal-obb-handle')]
       .filter(h=>h.style.display!=='none');
     out.handleCount=handles.length;
@@ -1679,9 +1833,12 @@ async function main() {
   check('贴面矩形生成投影机 OBB（position/quaternion/half 合法）',
     s25.hasProjector === true && s25.projValid === true,
     `${s25.hasProjector}/${s25.projValid}`);
-  check('编辑器画 OBB 线框（12 边）+ 选中 7 手柄（含角色标记）',
+  check('编辑器画 OBB 线框（12 边，逐段绘制）+ 选中 7 手柄（含角色标记）',
     s25.edgesVisible === true && s25.handleCount === 7 && s25.handlesTagged === true,
-    `edges=${s25.edgeCount} handles=${s25.handleCount} roles=${s25.handleRoles}`);
+    `edges=${s25.edgeCount} seg=${s25.edgeSeg} handles=${s25.handleCount} roles=${s25.handleRoles}`);
+  check('正交 OBB 选中时出现三轴旋转环（X/Y/Z 各一条环形命中区）',
+    s25.ringCount >= 24 && s25.ringAxes === 'rx,ry,rz' && s25.ringHits === 3,
+    `rings=${s25.ringCount} axes=${s25.ringAxes} hits=${s25.ringHits}`);
   check('投影式贴花不再渲染旧网格 / 单应视频 DOM',
     s25.legacyDomHidden === true && s25.legacyCellsHidden === true);
   check('无 projector 时退化为屏幕占位框：无网格尖刺、尺寸有限、可恢复',
@@ -2065,14 +2222,26 @@ async function main() {
   console.log('\n[29] 错误汇总');
   const ex = events.filter((e) => e.method === 'Runtime.exceptionThrown');
   const le = events.filter((e) => e.method === 'Log.entryAdded' && e.params.entry.level === 'error');
-  const bad = events.filter((e) => e.method === 'Network.responseReceived' && e.params.response.status >= 400);
+  /* 只对「本地资源」断言 200：本用例里有若干故意写死的外链占位符
+     （网页展板 iframe 的 https://example.com/hall、图片 /a.png、视频 /a.mp4），
+     它们必然 404，且是否在下一次断言前返回取决于加载时序 —— 拿它当失败项
+     属于用例自身的假失败。外链单独统计、只做信息输出。 */
+  const isLocal = (u) => /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/)/.test(u || '') ||
+    /^(data|blob):/.test(u || '');
+  const badAll = events.filter((e) => e.method === 'Network.responseReceived' && e.params.response.status >= 400);
+  const bad = badAll.filter((e) => isLocal(e.params.response.url));
+  const externalBad = badAll.filter((e) => !isLocal(e.params.response.url));
   const exDetail = ex.map((e) => {
     const d = e.params.exceptionDetails || {};
     return (d.exception?.description || d.text || '').split('\n').slice(0, 4).join(' | ');
   });
   check('0 个 JS 异常', ex.length === 0, exDetail);
   check('0 个 console error', le.length === 0, le.slice(0, 3).map((e) => String(e.params.entry.text).slice(0, 160)));
-  check('0 个 HTTP>=400', bad.length === 0, bad.slice(0, 5).map((e) => e.params.response.status + ' ' + e.params.response.url));
+  check('0 个 HTTP>=400（本地资源）', bad.length === 0, bad.slice(0, 5).map((e) => e.params.response.status + ' ' + e.params.response.url));
+  if (externalBad.length) {
+    console.log('  信息：外链占位符返回非 200（测试夹具，不计入失败）'
+      + JSON.stringify(externalBad.slice(0, 3).map((e) => e.params.response.status + ' ' + e.params.response.url)));
+  }
 
   console.log('\n[30] 复制 / 层级置顶置底 / 右键上下文菜单 / 撤销合并隔离 / 选中 reconcile');
   const s30 = await E(`(async()=>{
@@ -2187,6 +2356,9 @@ async function main() {
   console.log('\n[32] GPU 贴花渲染路径守卫（编辑态黑屏回归）');
   const decalSrc = fs.readFileSync(path.join(ROOT, 'web', 'editor', 'decal-projection.js'), 'utf8');
   const editorSrc = fs.readFileSync(path.join(ROOT, 'web', 'editor', 'editor.js'), 'utf8');
+  /* 「注记 → GPU 实例描述」这段映射已抽到 web/decal-runtime.js，由编辑器与
+     浏览态共用（浏览态也能看到投射视频）。相关源码守卫改读这个共享模块。 */
+  const decalRuntimeSrc = fs.readFileSync(path.join(ROOT, 'web', 'decal-runtime.js'), 'utf8');
   const pickingSrc = fs.readFileSync(path.join(ROOT, 'web', 'editor', 'picking.js'), 'utf8');
   const editorCssSrc = fs.readFileSync(path.join(ROOT, 'web', 'editor', 'editor.css'), 'utf8');
   /* 真机黑屏的真因（WebGPU 后端）：WGSL 里写了 input.pcPosition，但引擎生成的
@@ -2260,8 +2432,11 @@ async function main() {
     /decal-degrade-toast/.test(decalSrc));
   /* 「只有包围盒没有视频」的数据层根因：框选横跨远近物体（或深度拾取超时退化
      到碰撞网格）时 OBB 变成几十米巨盒，投射碎片化。必须有跨度/尺寸拦截。 */
+  /* 网格密度会随回读快路径调整（6×6 → 9×9，一次快照+一次块回读不增加回读次数），
+     所以这里只断言「unprojectRect 调用带显式 pickTimeout」+「具体数值可查」，
+     不再把网格维度写死，避免升级采样密度就误报回归。 */
   check('rebuild 拾取超时可配置（pickTimeout 透传，无头下用较短超时快速退化）',
-    /unprojectRect\(a\.rect, 6, 6, \{ pickTimeout: \d+ \}\)/.test(editorSrc) &&
+    /unprojectRect\(a\.rect, \d+, \d+, \{ pickTimeout: \d+ \}\)/.test(editorSrc) &&
     /pickTimeout: 900/.test(editorSrc) &&
     /opt\.pickTimeout/.test(pickingSrc));
   check('贴面巨盒拦截：深度跨度过大拒绝建盒',
@@ -2389,7 +2564,8 @@ async function main() {
     /i <= k && i < n/.test(wgslBody));
   check('背面剔除默认关闭（用户显式开启）',
     /decalCull: false/.test(schemaSrc) &&
-    /cull: a\.style\.decalCull === true/.test(editorSrc));
+    /cull: a\.style\?\.decalCull === true/.test(decalRuntimeSrc) &&
+    /decalsForGPU/.test(editorSrc));
   check('贴花诊断面板：背面剔除开关 + 归一化基准 + 深度口径 + 状态行',
     /data-field="decalCull"/.test(panelSrc) &&
     /data-field="decalBoxScale"/.test(panelSrc) &&
@@ -2622,7 +2798,7 @@ async function main() {
     /depth: Array\.from\(depth\)/.test(schemaSrc));
   check('编辑器重建 projector 时生成 shadow 并回传渲染层',
     /projector\.shadow = buildShadowDepthMap\(projector, raycast, \{ n: 24 \}\)/.test(editorSrc) &&
-    /shadow: a\.projector && a\.projector\.shadow/.test(editorSrc) &&
+    /shadow: a\.projector && a\.projector\.shadow/.test(decalRuntimeSrc) &&
     /a\.projector\.shadow && a\.projector\.shadow\.depth/.test(editorSrc));
   check('shadow 深度纹理走 R32F 数据纹理契约（刷新后仍可上传）',
     /format: 'r32f'/.test(decalSrc) &&
@@ -2679,8 +2855,102 @@ async function main() {
     /shadowSize: i\.shadow/.test(decalSrc) &&
     /shadowHits: i\.shadow/.test(decalSrc));
 
+  console.log('\n[36b] 编辑器默认飞行相机 + 动线贴地（与贴花同源的深度反算）');
+  const pickSrcD = fs.readFileSync(path.join(ROOT, 'web', 'editor', 'picking.js'), 'utf8');
+  const overlaySrc2 = fs.readFileSync(path.join(ROOT, 'web', 'editor', 'overlay.js'), 'utf8');
+  const storeSrc2 = fs.readFileSync(path.join(ROOT, 'web', 'editor', 'store.js'), 'utf8');
+  const appSrc2 = fs.readFileSync(path.join(ROOT, 'web', 'app.js'), 'utf8');
+  check('编辑期飞行不挂碰撞：进编辑摘挂、退出恢复',
+    /setCollisionEnabled\?\.\(false\)/.test(editorSrc) &&
+    /setCollisionEnabled\?\.\(true\)/.test(editorSrc));
+  check('编辑器进挂载即强制飞行相机，退出还原',
+    /__mgEditorFly = true/.test(editorSrc) &&
+    /st\.cameraMode = 'fly'/.test(editorSrc) &&
+    /function restoreCameraMode/.test(editorSrc) &&
+    /restoreCameraMode\(\);/.test(editorSrc) &&
+    // app.js 的「碰撞就绪自动切 walk」轮询必须给编辑器让位
+    /__mgEditor \|\| globalThis\.__mgEditorFly/.test(appSrc2));
+  check('动线贴地走深度反算（与贴花同一函数），不依赖碰撞 MESH',
+    /async function drapePolylineDepth/.test(pickSrcD) &&
+    /await depthUnproject\(sp\.x, sp\.y, \{ pickTimeout \}\)/.test(pickSrcD) &&
+    /drapePolylineDepth,/.test(pickSrcD) &&
+    // 只接受「视线命中的真实表面」；ground/free 是标定参考平面，不能拿来做贴地
+    /h\.source === 'depth' \|\| h\.source === 'mesh'/.test(pickSrcD) &&
+    // 同视线校验：命中点重新投影必须仍在采样像素上（否则固定返回值的拾取会把线塌成一点）
+    /Math\.abs\(q\.x - sp\.x\) <= 4/.test(pickSrcD) &&
+    // 一个真实命中都没有时不许落「假贴地」结果
+    /res\.source === 'none'/.test(editorSrc) &&
+    // 采样上限：深度反算是逐像素 readback，长线必须抽稀
+    /maxSamples/.test(pickSrcD));
+  check('贴地结果持久化进注记（含 pointsSig 失效判据），浏览态可直接复用',
+    /drape: patch\.drape \|\| null/.test(schemaSrc) &&
+    /drapeMeta: patch\.drapeMeta \|\| null/.test(schemaSrc) &&
+    /needsDrape/.test(editorSrc) && /drapePolylineDepth\(a\.points/.test(editorSrc) &&
+    /noUndo: true/.test(editorSrc) && /if \(opts\.noUndo\)/.test(storeSrc2) &&
+    // 复制标注时贴地中心线必须一起平移，否则副本画在原位置
+    /copy\.drape = copy\.drape\.map/.test(storeSrc2));
+  check('动线渲染优先消费持久化贴地中心线（a.drape），顶点一改立即失效',
+    /const stored = Array\.isArray\(a\.drape\)/.test(overlaySrc2) &&
+    /a\.drapeMeta\.pointsSig === pointsSig/.test(overlaySrc2) &&
+    /if \(stored\) f\.world = a\.drape;/.test(overlaySrc2));
+
+  /* [36c] 贴花辅助线的场景深度判断 + 正交 OBB 旋转交互（上轮遗留的两项补齐）
+     深度判断必须复用贴面矩形的「1 次 prepare + 1 次 readAround」快路径：
+     若退回逐点 pick（每点一次同步回读），编辑器一拖就卡死。 */
+  console.log('\n[36c] 辅助线场景深度判断 + 正交 OBB 旋转交互');
+  check('辅助线深度判断：picking 提供 probeOcclusion 且经 editor 透传给 overlay',
+    /async function probeOcclusion\(worldPoints, opts = \{\}\)/.test(pickSrcD) &&
+    /probeOcclusion,/.test(pickSrcD) &&
+    /probeOcclusion: \(pts, opt\) => picker\.probeOcclusion\(pts, opt\)/.test(editorSrc) &&
+    /this\.probeOcclusion = probeOcclusion \|\| null;/.test(overlaySrc2));
+  check('辅助线深度判断：一次快照 + 一次块回读，块过大时主动放弃（不卡主线程）',
+    /withTimeout\(Promise\.resolve\(ph\.prepare\(\)\), FAST_TIMEOUT\)/.test(pickSrcD) &&
+    /withTimeout\(Promise\.resolve\(ph\.readAround\(cx, cy, margin, width, height\)\), FAST_TIMEOUT\)/.test(pickSrcD) &&
+    /margin > maxMargin/.test(pickSrcD) &&
+    /sampleDepthAt\(depthAt, px, py\)/.test(pickSrcD));
+  check('辅助线深度判断：静止去抖 300ms 才探测，绘制用上一轮缓存（不每帧回读）',
+    /t - occ\.at >= 300/.test(overlaySrc2) &&
+    /occ\.done !== key/.test(overlaySrc2) &&
+    /this\._decalOcclusion\(a, o, probePts\)/.test(overlaySrc2));
+  check('OBB / 视锥体棱线逐段绘制，被挡段走 is-blocked 虚线（不是整块隐藏）',
+    /const SEG = selected \? 6 : 1;/.test(overlaySrc2) &&
+    /ed-decal-obb-seg is-blocked/.test(overlaySrc2) &&
+    /\.ed-decal-obb-seg\.is-blocked/.test(editorCssSrc));
+  check('正交 OBB 有三轴旋转环（rx/ry/rz）+ 透明粗描边命中区',
+    /k: 'rx'/.test(overlaySrc2) && /k: 'ry'/.test(overlaySrc2) && /k: 'rz'/.test(overlaySrc2) &&
+    /ed-decal-ring-hit/.test(overlaySrc2) && /\.ed-decal-ring-hit/.test(editorCssSrc));
+  check('旋转环拖拽走「射线 ∩ 环平面」方位角差，增量乘到按下快照（不累积漂移）',
+    /_decalDragWorld\(e\.clientX, e\.clientY, cam, c0, N\)/.test(overlaySrc2) &&
+    /this\._applyDecalRotate\(id, N, d, base0\)/.test(overlaySrc2) &&
+    /quatMul\(quatFromAxis\(worldAxis, angle\), base\.quaternion\)/.test(overlaySrc2) &&
+    /export function quatMul/.test(schemaSrc));
+
+  /* 块回读快路径的可用性前提与安全阀：
+     ① 引擎 picker 的包装对象必须转发 prepare / readAround / queue ——
+        少了这层转发，编辑器的「1 次回读」永远拿不到引擎能力，只能退回
+        「每点一次同步回读」（实测 100 点 19.5s，就是用户说的「特别慢」）；
+     ② 快路径必须外层硬超时，且 prepare 不能进引擎的串行 pick 队列 ——
+        无头 SwiftShader 渲 7.4M 高斯时 prepare 可几十秒不返回，塞进队列会把
+        后续所有 pick 一起堵死（表现为编辑器整体卡死）；
+     ③ 首次使用必须与引擎单点反算交叉自检，偏差过大就回退：
+        「快」绝不能以「贴面矩形整体错位」为代价。 */
+  const viewerSrcFast = fs.readFileSync(path.join(ROOT, 'web', 'viewer', 'index.js'), 'utf8');
+  check('块回读快路径：引擎 picker 包装层暴露 prepare / readAround / queue',
+    /prepare: \(\) => activePicker\(\)\.prepare\(\)/.test(viewerSrcFast) &&
+    /readAround: \(sx, sy, margin, width, height\) =>/.test(viewerSrcFast) &&
+    /get queue\(\) \{ return activePicker\(\)\.queue; \}/.test(viewerSrcFast) &&
+    /this\.readAround = \(screenX, screenY, margin, width, height\) =>/.test(viewerSrcFast));
+  check('块回读快路径：外层硬超时 + 连续失败停用，且不塞进引擎 pick 队列',
+    /const FAST_TIMEOUT = 4000;/.test(pickSrcD) &&
+    /if \(fastFail >= 3\) return null;/.test(pickSrcD) &&
+    /withTimeout\(task, FAST_TIMEOUT\)/.test(pickSrcD) &&
+    !/const run = \(typeof ph\.queue\?\.run === 'function'\)/.test(pickSrcD));
+  check('块回读快路径：首次使用与引擎单点反算交叉自检（偏差 >0.5m 即回退）',
+    /if \(!fastVerified\)/.test(pickSrcD) &&
+    /if \(d > 0\.5\) return null;/.test(pickSrcD));
+
   /* 外部契约：window.__viewer（在 web/app.js 挂载）与 window.__mgEditorBridge
-     （web/editor/bridge.js）的字段、方法名与签名本轮不得改动。
+    （web/editor/bridge.js）的字段、方法名与签名本轮不得改动。
      这里做「结构存在性」守卫：本轮未触碰这两个文件，故断言其关键成员仍在。 */
   const bridgeSrc = fs.readFileSync(path.join(ROOT, 'web', 'editor', 'bridge.js'), 'utf8');
   const appSrc = fs.readFileSync(path.join(ROOT, 'web', 'app.js'), 'utf8');
